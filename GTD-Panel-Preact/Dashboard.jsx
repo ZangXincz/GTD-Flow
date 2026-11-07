@@ -216,6 +216,18 @@ export const PANEL_CSS = `
         padding: 1px 7px;
         border-radius: 10px;
     }
+    /* 可折叠分组（等待中/日历）：标题可点击，箭头指示展开/收起 */
+    .gtd-section-head.gtd-head-toggle {
+        cursor: pointer;
+        user-select: none;
+    }
+    .gtd-section-head.gtd-head-toggle:hover {
+        color: var(--main-text-color);
+    }
+    .gtd-collapse-arrow {
+        font-size: 11px;
+        opacity: .7;
+    }
     .gtd-section-body {
         padding-left: 14px;
     }
@@ -255,32 +267,79 @@ export const PANEL_CSS = `
     .gtd-state-menu-item:hover {
         background: var(--active-item-background-color, #45475a);
     }
-    /* ── Today's Focus 聚焦样式：红色淡底卡片，唯一有背景的分组 ── */
+    /* ── Today's Focus 聚焦：轻量卡片 + 左侧色条，比普通分组略突出但不突兀 ── */
+    .gtd-section-focus {
+        background: rgba(239, 83, 80, .028);
+        border: 1px solid rgba(239, 83, 80, .13);
+        border-left: 3px solid rgba(239, 83, 80, .55);
+        border-radius: 10px;
+        padding: 10px 14px 6px;
+        margin-bottom: 28px;
+    }
     .gtd-section-focus .gtd-section-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 0;
+        padding-bottom: 8px;
+        border-bottom: 1px solid rgba(128, 128, 128, .12);
+        font-size: 14px;
         color: #ef5350;
     }
     .gtd-section-focus .gtd-section-count {
         color: #ef5350;
         background: rgba(239, 83, 80, .12);
     }
+    .gtd-section-focus .gtd-section-body {
+        padding-left: 0;
+    }
+    /* 行：占位略大 + 发丝线分隔，无独立卡片底 */
     .gtd-section-focus .gtd-task-row {
-        background: rgba(239, 83, 80, .07);
-        border-left: 3px solid rgba(239, 83, 80, .55);
-        border-radius: 6px;
-        padding: 6px 10px;
-        margin: 5px 0;
+        background: transparent;
+        border: none;
+        border-top: 1px solid rgba(128, 128, 128, .12);
+        border-radius: 8px;
+        padding: 9px 6px;
+        margin: 0;
+        font-size: 16px;
+        line-height: 1.5;
         transition: background .15s;
     }
-    .gtd-section-focus .gtd-task-row:hover {
-        background: rgba(239, 83, 80, .13);
+    .gtd-section-focus .gtd-task-row:first-child {
+        border-top: none;
     }
-    /* Focus 区非首条：灰色卡片，把红色让给第一条 */
+    .gtd-section-focus .gtd-task-row:hover {
+        background: rgba(239, 83, 80, .06);
+    }
+    /* 非首条不再灰化：统一用完整文本，仅首条标红强调 */
     .gtd-section-focus .gtd-task-row.gtd-focus-muted {
-        background: rgba(158, 158, 158, .08);
-        border-left-color: rgba(158, 158, 158, .45);
+        background: transparent;
     }
     .gtd-section-focus .gtd-task-row.gtd-focus-muted:hover {
-        background: rgba(158, 158, 158, .14);
+        background: rgba(239, 83, 80, .06);
+    }
+    .gtd-section-focus .gtd-task-text {
+        font-weight: 500;
+    }
+    /* 卡片内的红色文字与色条同色系，避免深红/浅红两种红互相打架；
+       字重 600：红色在浅底上对比度低、视觉偏细，加一档与其他行
+       （500 + 深色）达到视觉一致；悬浮态一并钉死防跳变 */
+    .gtd-section-focus .gtd-task-text.gtd-text-alert,
+    .gtd-section-focus .gtd-task-text.gtd-text-alert:hover {
+        color: #e05252;
+        font-weight: 600;
+    }
+    /* Focus 区圆形勾选框，略大更好点 */
+    .gtd-section-focus .gtd-task-check {
+        width: 17px;
+        height: 17px;
+        margin-top: 2px;
+        border-width: 2px;
+        border-radius: 50%;
+        font-size: 11px;
+    }
+    .gtd-section-focus .gtd-task-handle {
+        margin-top: 2px;
     }
     /* 非焦点分组的任务文字弱化，让视线集中在 Today's Focus */
     .gtd-section:not(.gtd-section-focus) .gtd-task-text {
@@ -294,11 +353,8 @@ export const PANEL_CSS = `
         background: rgba(128, 128, 128, .08);
         border-radius: 6px;
     }
-    /* Focus 首条（红色卡片）加轻微投影，强化"当前唯一重点" */
-    .gtd-section-focus .gtd-task-row:not(.gtd-focus-muted) {
-        background: rgba(239, 83, 80, .10);
-        box-shadow: 0 1px 6px rgba(239, 83, 80, .18);
-    }
+    /* Focus 首条不再单独铺底色：与其余行共用卡片底，
+       仅靠红色文字表达"当前唯一重点"，避免叠加出突兀色带 */
 `;
 
 // =========================================================
@@ -315,6 +371,13 @@ export function Dashboard({
 }) {
 
     const [dragKey, setDragKey] = useState(null); // 正在拖拽的任务 key
+
+    // ── 等待中 / 日历分组默认折叠：不持久化，每次数据刷新重置为折叠，
+    //    展开只是临时态（点分组标题切换）──
+    const [collapsed, setCollapsed] = useState(() => ({ waiting: true, calendar: true }));
+    useEffect(() => {
+        setCollapsed({ waiting: true, calendar: true });
+    }, [sections]);
 
     // ── 日期胶囊编辑：点击胶囊弹出浮层，选择即写回任务文本的 #日期 ──
     const [dateEdit, setDateEdit] = useState(null); // { task, x, y } | null
@@ -482,6 +545,9 @@ export function Dashboard({
                 if (!section.tasks.length) return null;
 
                 const isFocus = section.key === 'doing';
+                // 等待中 / 日历默认折叠：标题可点击切换
+                const isCollapsible = section.key === 'waiting' || section.key === 'calendar';
+                const isCollapsed = isCollapsible && collapsed[section.key];
 
                 return (
                     <div
@@ -489,24 +555,41 @@ export function Dashboard({
                         class={'gtd-section' + (isFocus ? ' gtd-section-focus' : '')}
                         data-key={section.key}
                     >
-                        <div class="gtd-section-head">
+                        <div
+                            class={'gtd-section-head'
+                                + (isCollapsible ? ' gtd-head-toggle' : '')}
+                            onClick={isCollapsible
+                                ? () => setCollapsed(c => ({
+                                    ...c, [section.key]: !c[section.key]
+                                }))
+                                : undefined}
+                        >
                             <span
                                 class="gtd-section-dot"
                                 style={`background:${section.color};`}
                             ></span>
                             {section.label}
                             <span class="gtd-section-count">{section.tasks.length}</span>
+                            {isCollapsible && (
+                                <span class="gtd-collapse-arrow">
+                                    {isCollapsed ? '▸' : '▾'}
+                                </span>
+                            )}
                         </div>
-                        <div
-                            class="gtd-section-body"
-                            style={isFocus ? undefined : `border-left:2px solid ${section.color}55;`}
-                            onDragOver={e => { if (dragKey !== null) e.preventDefault(); }}
-                            onDrop={e => {
-                                if (dragKey !== null) { e.preventDefault(); finishDrag(); }
-                            }}
-                        >
-                            {section.tasks.map((t, i) => renderTask(section, t, i))}
-                        </div>
+                        {!isCollapsed && (
+                            <div
+                                class="gtd-section-body"
+                                style={isFocus
+                                    ? undefined
+                                    : `border-left:2px solid ${section.color}55;`}
+                                onDragOver={e => { if (dragKey !== null) e.preventDefault(); }}
+                                onDrop={e => {
+                                    if (dragKey !== null) { e.preventDefault(); finishDrag(); }
+                                }}
+                            >
+                                {section.tasks.map((t, i) => renderTask(section, t, i))}
+                            </div>
+                        )}
                     </div>
                 );
             })}
