@@ -34,6 +34,9 @@ export const NOTES = {
 
     // ── 其他目标 ──
     maybe: 'cv1X2cJxnCb6',          // 将来/也许（不纳入面板检索）
+    // 参考资料收集箱：处理收集箱「参考资料」时，在其下新建子笔记
+    // （标题 = 任务标题，内容 = 描述），收集箱条目随后删除
+    reference: 'dFw1YV5zPjOB',
     // 额外纳入面板检索的独立笔记（一般留空）
     watchExtra: [],
 
@@ -241,11 +244,25 @@ export function parseInboxItems(content, today = todayStr()) {
         const text = normText(extractTaskText(input, li));
         if (!text) continue;
 
+        // 条目自带的子内容（描述）：取该 li 直接下属嵌套列表的各行纯文本。
+        // 处理收集箱时预填到「描述」输入框——否则移动条目（删 li 重建）时
+        // 原有描述会丢失
+        const descLines = [];
+        if (li) {
+            const subUl = li.querySelector('ul');
+            if (subUl) {
+                for (const subLi of subUl.querySelectorAll(':scope > li')) {
+                    const line = normText(subLi.textContent || '');
+                    if (line) descLines.push(line);
+                }
+            }
+        }
+
         // 择日再看：文本含 #yyyy-mm-dd 且日期未到的条目暂不列出（到期当天起重新显示）
         const snoozeDate = (text.match(/#(\d{4}-\d{2}-\d{2})/) || [])[1];
         if (snoozeDate && snoozeDate > today) continue;
 
-        items.push({ checkboxIndex: idx, text });
+        items.push({ checkboxIndex: idx, text, descLines });
     }
 
     return items;

@@ -1001,3 +1001,88 @@ export function moveInboxItem(runOnBackend, inboxNoteId, cbIndex, targetNoteId, 
 
     }, [inboxNoteId, cbIndex, targetNoteId, opts, srcText]);
 }
+
+// 参考资料处理：
+//   1) 在 parentId（参考资料收集箱）下新建子笔记：标题 = 任务标题，
+//      内容 = 描述逐行成段落（空描述则空内容）
+//   2) 从收集箱 Tasks 删除第 cbIndex 个 checkbox 所在 li（含其子内容）
+// 先建笔记再删源（失败安全）：新建失败时收集箱原条目还在，不丢数据；
+// 删除失败时最多两边重复（笔记 + 条目），可手动清理
+// text: 面板端条目文本，写盘前校验用（空则跳过校验）
+export function moveInboxToReference(runOnBackend, inboxNoteId, cbIndex,
+                                     parentId, title, desc, text) {
+    return runOnBackend((inboxNoteId, cbIndex, parentId, title, desc, text) => {
+
+        const cleanTitle = String(title || '').trim();
+        if (!cleanTitle) throw new Error('标题不能为空');
+
+        const parent = api.getNote(parentId);
+        if (!parent) throw new Error('未找到参考资料收集箱笔记：' + parentId);
+
+        // ── 1) 新建子笔记：描述逐行 → 段落 ──
+        const esc = s => String(s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const lines = String(desc || '').split(/\r?\n/)
+            .map(s => s.trim()).filter(Boolean);
+        const content = lines.map(l => '<p>' + esc(l) + '</p>').join('');
+        api.createNote(parentId, cleanTitle, content, { type: 'text' });
+
+        // ── 2) 从收集箱删除该条目（定位/校验与 moveInboxItem 同一套）──
+        const inboxNote = api.getNote(inboxNoteId);
+        if (!inboxNote) throw new Error('未找到收集箱 Tasks 笔记：' + inboxNoteId);
+        const c = String(inboxNote.getContent());
+
+        const inputRe = /<input\b[^>]*>/gi;
+        const checkboxTypeRe = /\btype\s*=\s*(?:"checkbox"|'checkbox'|checkbox)/i;
+        let m, inputStart = -1, i = 0;
+        while ((m = inputRe.exec(c)) !== null) {
+            if (!checkboxTypeRe.test(m[0])) continue;
+            if (i++ === cbIndex) { inputStart = m.index; break; }
+        }
+        if (inputStart < 0) throw new Error('未找到对应的 checkbox');
+
+        const liStart = c.lastIndexOf('<li', inputStart);
+        if (liStart < 0) throw new Error('未找到包裹的 li 标签');
+        if (c.lastIndexOf('</li>', inputStart) > liStart) {
+            throw new Error('checkbox 与 li 不匹配');
+        }
+
+        const liTagRe = /<(\/?)li\b[^>]*>/gi;
+        liTagRe.lastIndex = liStart;
+        let liDepth = 0, liEnd = -1, lm;
+        while ((lm = liTagRe.exec(c)) !== null) {
+            if (lm[1] === '/') {
+                liDepth--;
+                if (liDepth === 0) { liEnd = lm.index + lm[0].length; break; }
+            } else {
+                liDepth++;
+            }
+        }
+        if (liEnd < 0) throw new Error('未找到 li 结束标签');
+
+        const normLiText = s => String(s)
+            .replace(/<[^>]*>/g, '')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/&amp;/gi, '&')
+            .replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>')
+            .replace(/&quot;/gi, '"')
+            .replace(/#(?:done|cancelled):\d{4}-\d{2}-\d{2} \d{2}-\d{2}/g, '')
+            .replace(/#\d{4}-\d{2}-\d{2}/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const expectedText = normLiText(text);
+        if (expectedText) {
+            const liHtml = c.slice(liStart, liEnd);
+            const chk = liHtml.match(
+                /<span class="todo-list__label__description"[^>]*>([\s\S]*?)<\/span>/i);
+            if (chk && normLiText(chk[1]) !== expectedText) {
+                throw new Error('收集箱条目内容已变化，面板数据可能过期，请刷新面板后重试');
+            }
+        }
+
+        inboxNote.setContent(c.slice(0, liStart)
+            + c.slice(liEnd).replace(/^\s*\n/, ''));
+
+    }, [inboxNoteId, cbIndex, parentId, title, desc, text]);
+}

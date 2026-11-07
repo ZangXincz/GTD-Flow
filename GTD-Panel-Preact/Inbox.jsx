@@ -459,6 +459,7 @@ function dateOffset(days) {
 //          | { mode: 'move', title, desc, date, delegate, projectId }
 //          | { mode: 'delete', desc }
 //          | { mode: 'maybe', desc }
+//          | { mode: 'reference', title, desc }
 //          | { mode: 'snooze', date }
 export function InboxProcess({
     item, remaining, busy, errorText,
@@ -467,7 +468,9 @@ export function InboxProcess({
 }) {
 
     const [title, setTitle] = useState(item ? item.text : '');
-    const [desc, setDesc] = useState('');
+    // 描述预填条目已有的子内容（快速收集/编辑器里写的），处理时可改可带走
+    const [desc, setDesc] = useState(
+        item && item.descLines ? item.descLines.join('\n') : '');
     const [canAct, setCanAct] = useState(false);    // 已选「是的，可执行」
     const [exec, setExec] = useState(null);         // done | more
     const [date, setDate] = useState('');           // 安排日期（可选）
@@ -520,8 +523,14 @@ export function InboxProcess({
         setTip('');
     }
 
-    function pickNotReady() {
-        setTip('该处理方式暂未接入，先试试「是的，可执行」');
+    function pickReference() {
+        setCanAct(false);   // 独占选项：不属于「可执行」路线
+        setExec('reference');
+        setWho(null);
+        setAsProject(false);
+        setDate('');
+        setProjectId('');
+        setTip('');
     }
 
     // ── 设为项目：仅暂选（与「我来做/委派他人」三选一），
@@ -536,7 +545,8 @@ export function InboxProcess({
     function submit() {
 
         const cleanTitle = String(title).trim();
-        const unary = exec === 'delete' || exec === 'maybe' || exec === 'snooze';
+        const unary = exec === 'delete' || exec === 'maybe'
+            || exec === 'snooze' || exec === 'reference';
 
         if (!canAct && !unary) { setTip('请先选择处理方式'); return; }
         if (exec === 'delete') {
@@ -547,6 +557,13 @@ export function InboxProcess({
         if (exec === 'maybe') {
             // 将来/也许：保留原文，状态标记为待定，移入指定文件；备注转子内容
             onSubmit({ mode: 'maybe', desc: String(desc).trim() });
+            return;
+        }
+        if (exec === 'reference') {
+            // 参考资料：在指定收集箱下新建子笔记（标题 = 任务标题，内容 = 描述），
+            // 收集箱条目随后删除
+            if (!cleanTitle) { setTip('标题不能为空'); return; }
+            onSubmit({ mode: 'reference', title: cleanTitle, desc: String(desc).trim() });
             return;
         }
         if (exec === 'snooze') {
@@ -582,8 +599,9 @@ export function InboxProcess({
         });
     }
 
-    // 独占选项（删除/将来也许/择日再看）与「可执行」路线互斥
-    const unary = exec === 'delete' || exec === 'maybe' || exec === 'snooze';
+    // 独占选项（删除/将来也许/择日再看/参考资料）与「可执行」路线互斥
+    const unary = exec === 'delete' || exec === 'maybe'
+        || exec === 'snooze' || exec === 'reference';
     const canSubmit = !busy && (
         (unary && (exec !== 'snooze' || !!date)) ||
         (canAct && !!String(title).trim() && (
@@ -658,7 +676,11 @@ export function InboxProcess({
                         disabled={busy}
                         onClick={pickSnooze}
                     >📅 择日再看</button>
-                    <button class="gtd-proc-opt" disabled={busy} onClick={pickNotReady}>📄 参考资料</button>
+                    <button
+                        class={'gtd-proc-opt' + (exec === 'reference' ? ' gtd-opt-active' : '')}
+                        disabled={busy}
+                        onClick={pickReference}
+                    >📄 参考资料</button>
                 </div>
 
                 {/* 择日再看：只选日期（无时间），任务留原地，到期才重新显示

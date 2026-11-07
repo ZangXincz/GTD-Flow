@@ -72,7 +72,8 @@ const {
 
 const {
     collectTasks, archiveTask, setTaskDate, collectInboxTasks,
-    listProjects, resolveWeekTarget, moveInboxItem, createProjectFromTemplate
+    listProjects, resolveWeekTarget, moveInboxItem, moveInboxToReference,
+    createProjectFromTemplate
 } = gtdBackend;
 
 const dashboardMod = Dashboard;
@@ -622,6 +623,19 @@ export default function GtdMain() {
             if (choice.mode === 'snooze') {
                 await setTaskDate(runOnBackend, inboxNoteRef.current,
                     item.checkboxIndex, choice.date, item.text);
+                await loadInbox(true);
+                return;
+            }
+
+            // 参考资料：在 NOTES.reference 下新建子笔记（标题 = 任务标题，
+            // 内容 = 描述），然后从收集箱删除该条目
+            if (choice.mode === 'reference') {
+                if (!NOTES.reference || String(NOTES.reference).indexOf('填写') >= 0) {
+                    throw new Error('需要先在 gtdCore 的 NOTES.reference 配置参考资料收集箱笔记 ID');
+                }
+                await moveInboxToReference(runOnBackend, inboxNoteRef.current,
+                    item.checkboxIndex, NOTES.reference,
+                    choice.title, choice.desc, item.text);
                 await loadInbox(true);
                 return;
             }

@@ -26,6 +26,7 @@ const INBOX_TASKS_TITLES = ['Tasks'];
 
     let mask = null;
     let input = null;
+    let descInput = null;
     let errorBox = null;
     let docKeyHandler = null; // 浮层打开期间的全局按键处理
     let busy = false;
@@ -53,6 +54,14 @@ const INBOX_TASKS_TITLES = ['Tasks'];
             '  padding:9px 12px; outline:none; }',
             '.gtd-capture-input:focus {',
             '  border-color:var(--active-item-background-color,#a6e3a1); }',
+            '.gtd-capture-desc { margin-top:8px; width:100%; box-sizing:border-box;',
+            '  resize:vertical; min-height:54px;',
+            '  background:var(--main-background-color,#1e1e2e);',
+            '  border:1px solid var(--main-border-color,#45475a); border-radius:8px;',
+            '  color:var(--main-text-color); font-family:inherit; font-size:13px;',
+            '  padding:7px 10px; outline:none; }',
+            '.gtd-capture-desc:focus {',
+            '  border-color:var(--active-item-background-color,#a6e3a1); }',
             '.gtd-capture-error { display:none; margin-top:8px; font-size:13px;',
             '  color:#e0868c; word-break:break-all; }'
         ].join('\n');
@@ -67,6 +76,7 @@ const INBOX_TASKS_TITLES = ['Tasks'];
         if (mask) mask.remove();
         mask = null;
         input = null;
+        descInput = null;
         errorBox = null;
         busy = false;
     }
@@ -79,10 +89,11 @@ const INBOX_TASKS_TITLES = ['Tasks'];
 
     // ── 写入 Inbox 下属 Tasks 笔记（gtdBackend.captureToInbox 的自带副本，
     //    runOnBackend 函数体在后端执行，必须自包含）──
-    // 只写纯文本，不加时间前缀
-    async function writeToTasks(text) {
+    // 只写纯文本，不加时间前缀；desc 多行时逐行生成条目子内容
+    //（与处理收集箱「描述转子内容」同一结构，处理时可识别）
+    async function writeToTasks(text, desc) {
 
-        await api.runOnBackend((text, inboxNoteId, childTitles) => {
+        await api.runOnBackend((text, desc, inboxNoteId, childTitles) => {
 
             const parent = api.getNote(inboxNoteId);
             if (!parent) throw new Error('未找到 Inbox 笔记（检查脚本顶部 INBOX_NOTE_ID）');
@@ -98,11 +109,22 @@ const INBOX_TASKS_TITLES = ['Tasks'];
                     + (childTitles || []).join(' / ') + '）');
             }
 
-            const safe = String(text)
+            const esc = s => String(s)
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;');
+
+            const safe = esc(text);
+
+            // 描述逐行 → 条目子内容（嵌套列表，结构与编辑器保存格式一致）
+            const descLines = String(desc || '').split(/\r?\n/)
+                .map(s => s.trim()).filter(Boolean);
+            const descHtml = descLines.length
+                ? '<ul>' + descLines.map(line =>
+                    '<li><span class="ck-list-bogus-paragraph">'
+                    + esc(line) + '</span></li>').join('') + '</ul>'
+                : '';
 
             // 结构与 CKEditor/Trilium 实际保存格式一致（span 版，非 label 版）
             const li = '<li>'
@@ -110,6 +132,7 @@ const INBOX_TASKS_TITLES = ['Tasks'];
                 + '<span contenteditable="false"><input type="checkbox" tabindex="-1"></span>'
                 + '<span class="todo-list__label__description">' + safe + '</span>'
                 + '</span>'
+                + descHtml
                 + '</li>';
 
             let content = String(target.getContent());
@@ -125,12 +148,13 @@ const INBOX_TASKS_TITLES = ['Tasks'];
 
             target.setContent(content);
 
-        }, [text, INBOX_NOTE_ID, INBOX_TASKS_TITLES]);
+        }, [text, desc, INBOX_NOTE_ID, INBOX_TASKS_TITLES]);
     }
 
     // ── 提交 ──
     async function submit() {
         const text = input.value.trim();
+        const desc = descInput ? descInput.value : '';
         if (!text || busy) return;
 
         // 配置守卫：Electron 里原生 alert 可能被吞，错误一律显示在浮层内
@@ -141,16 +165,18 @@ const INBOX_TASKS_TITLES = ['Tasks'];
 
         busy = true;
         input.disabled = true;
+        if (descInput) descInput.disabled = true;
         if (errorBox) { errorBox.textContent = ''; errorBox.style.display = 'none'; }
 
         try {
-            await writeToTasks(text);
+            await writeToTasks(text, desc);
             close();
         } catch (e) {
             console.error('[gtd] 快速收集失败', e);
             showError('保存失败：' + ((e && e.message) || e));
             busy = false;
             if (input) { input.disabled = false; input.focus(); }
+            if (descInput) descInput.disabled = false;
         }
     }
 
@@ -168,17 +194,23 @@ const INBOX_TASKS_TITLES = ['Tasks'];
 
         const hint = document.createElement('div');
         hint.className = 'gtd-capture-hint';
-        hint.innerHTML = '<span>⚡ 快速收集</span><span>Enter 保存 · Esc 取消</span>';
+        hint.innerHTML = '<span>⚡ 快速收集</span>'
+            + '<span>Enter 保存 · Shift+Enter 换行 · Esc 取消</span>';
 
         input = document.createElement('input');
         input.className = 'gtd-capture-input';
         input.placeholder = '想到什么就记下来…';
 
+        descInput = document.createElement('textarea');
+        descInput.className = 'gtd-capture-desc';
+        descInput.placeholder = '描述（可选，一行一项，处理收集箱时自动识别）';
+
         errorBox = document.createElement('div');
         errorBox.className = 'gtd-capture-error';
 
         // 键盘处理绑定在 document 捕获阶段：即使焦点被 CKEditor 异步抢走，
-        // Enter / Esc 依然生效；排除输入法组词阶段的 Enter（isComposing）
+        // Enter / Esc 依然生效；排除输入法组词阶段的 Enter（isComposing）。
+        // 描述框内：Shift+Enter 换行（放行默认行为），Enter 直接保存
         docKeyHandler = e => {
             if (e.key === 'Escape') {
                 e.preventDefault();
@@ -187,6 +219,7 @@ const INBOX_TASKS_TITLES = ['Tasks'];
                 return;
             }
             if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
+                if (e.target === descInput && e.shiftKey) return; // 换行
                 e.preventDefault();
                 e.stopPropagation();
                 submit();
@@ -201,6 +234,7 @@ const INBOX_TASKS_TITLES = ['Tasks'];
 
         box.appendChild(hint);
         box.appendChild(input);
+        box.appendChild(descInput);
         box.appendChild(errorBox);
         mask.appendChild(box);
         document.body.appendChild(mask);
