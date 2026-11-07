@@ -117,7 +117,8 @@ export function collectTasks(runOnBackend, scope, exclude, paused) {
 //   其他状态       → 移除已有时间戳
 //   任务在 Quick Tasks 里且为 done/cancelled → 移入 Archive 列表最前（最新在最上）
 //   任务在项目子树里 → 刷新 Archive 的项目处理记录（已勾选任务形式，
-//   文本「今日 项目 完成 N 个任务」+ #done:时间戳；重新统计，幂等）
+//   文本「今日 项目（#noteId）完成 N 个任务」+ #done:时间戳；重新统计，幂等；
+//   #noteId 作为定位锚点，项目改名后记录仍可接续，标题随当前名重写）
 // opts: { archiveNoteId, quickNoteId, projectsRoot }，字段可为 null（跳过对应分支）
 // text: 面板端任务文本，写盘前与 li 实际文本比对（防止面板数据过期按序号改错
 //       条目）；为空则跳过校验
@@ -334,12 +335,15 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, t
                     let ac = String(archiveNote.getContent());
 
                     // ── 2) 基数：该项目最近一条「今天之前」记录的数字（只读不写）──
-                    //    记录形如「今日 TITLE 完成 N 个任务 #done:YYYY-MM-DD HH-mm」；
+                    //    记录形如「今日 TITLE（#noteId）完成 N 个任务 #done:YYYY-MM-DD HH-mm」；
                     //    历史记录是快照，永远不会被改写，删除历史任务/记录后，
                     //    今天的数字仍从最近一条历史记录出发继续叠加
-                    const recKey = escTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    //    定位统一锚定项目 noteId（改名不影响），只认带（#id）的记录
+                    const escId = String(projectId)
+                        .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
                     const prevRecRe = new RegExp(
-                        '今日\\s*' + recKey + '\\s*完成\\s*(\\d+)\\s*个任务'
+                        '（#' + escId + '）[^<]*?完成\\s*(\\d+)\\s*个任务'
                         + '[^<]*#(?:done|cancelled):(\\d{4}-\\d{2}-\\d{2})', 'gi');
                     let base = 0, baseDate = '', pm;
                     while ((pm = prevRecRe.exec(ac)) !== null) {
@@ -354,7 +358,10 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, t
                     //    删掉今天的记录再完成，会按同一公式重算回来
                     const count = base + todayCount;
 
-                    const recordText = '今日 ' + escTitle + ' 完成 ' + count + ' 个任务';
+                    // 记录文本：项目名后紧跟（#noteId）作为定位锚点——
+                    // 项目改名后基数/今日记录仍能接上；标题用当前名重写
+                    const recordText = '今日 ' + escTitle + '（#' + projectId
+                        + '）完成 ' + count + ' 个任务';
 
                     // 记录条目 = 已勾选任务形式，混入归档任务一起，
                     // 文本后带 #done:完成时间戳（与归档任务同一标识）
@@ -365,12 +372,14 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, t
                         + '<span class="todo-list__label__description">' + recValue + '</span>'
                         + '</span></li>';
 
-                    // 已有该项目「今天」的记录 → 原地替换文本与时间戳；
-                    // 否则（含跨天）插到最后一个列表的最前面（倒序，最新在最上，
-                    // 每天一条独立记录）。匹配锚定今天的日期，不会误改历史记录
+                    // 已有该项目「今天」的记录 → 原地替换文本与时间戳（改名后
+                    // 标题随当前项目名刷新）；否则（含跨天）插到最后一个列表的
+                    // 最前面（倒序，最新在最上，每天一条独立记录）。
+                    // 定位统一按（#noteId）锚定；匹配限定今天的日期，
+                    // 不会误改历史记录
                     const recRe = new RegExp(
-                        '(<span class="todo-list__label__description"[^>]*>)\\s*今日\\s*'
-                        + recKey + '\\s*完成[^<]*#(?:done|cancelled):' + today
+                        '(<span class="todo-list__label__description"[^>]*>)[^<]*'
+                        + '（#' + escId + '）[^<]*#(?:done|cancelled):' + today
                         + '[^<]*(<\\/span>)', 'i');
                     if (recRe.test(ac)) {
                         // 函数替换器的返回值不做 $ 模板处理，直接拼接即可
