@@ -61,6 +61,12 @@ export const PANEL_CSS = `
         color: var(--link-color, var(--main-text-color));
         text-decoration: underline;
     }
+    /* 右键复制成功后的短暂提示色 */
+    .gtd-task-text.gtd-copied,
+    .gtd-task-text.gtd-copied:hover {
+        color: var(--active-item-background-color, #a6e3a1) !important;
+        text-decoration: none;
+    }
     .gtd-task-src {
         flex-shrink: 0;
         font-size: 11px;
@@ -104,6 +110,48 @@ export const PANEL_CSS = `
         background: rgba(211, 47, 47, .14);
         border-color: transparent;
         font-weight: 600;
+    }
+    /* 日期胶囊可点击编辑：复用来源笔记胶囊（gtd-task-src）的悬浮交互 */
+    .gtd-task-date.gtd-date-editable {
+        cursor: pointer;
+        transition: color .15s, border-color .15s;
+    }
+    .gtd-task-date.gtd-date-editable:hover {
+        color: var(--main-text-color);
+        border-color: var(--muted-text-color, #888);
+    }
+    .gtd-date-edit {
+        position: fixed;
+        z-index: 9999;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        background: var(--main-background-color, #1e1e2e);
+        border: 1px solid var(--main-border-color, #45475a);
+        border-radius: 6px;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+    }
+    .gtd-date-edit-label {
+        font-size: 12px;
+        color: var(--muted-text-color, #888);
+        white-space: nowrap;
+    }
+    .gtd-date-edit-input {
+        font-size: 13px;
+        padding: 2px 4px;
+        color: var(--main-text-color);
+        background: transparent;
+        border: none;
+        outline: none;
+    }
+    .gtd-date-edit-clear {
+        font-size: 12px;
+        color: #d32f2f;
+        background: transparent;
+        border: none;
+        cursor: pointer;
+        white-space: nowrap;
     }
     .gtd-task-row {
         display: flex;
@@ -262,11 +310,46 @@ export const PANEL_CSS = `
 export function Dashboard({
     sections, todayStr, completingKeys,
     onMenuOpen,
-    onComplete, onOpenTask, onOpenNote,
+    onComplete, onOpenTask, onOpenNote, onEditDate,
     onDragStart, onDragOverRow, onDragEnd
 }) {
 
     const [dragKey, setDragKey] = useState(null); // 正在拖拽的任务 key
+
+    // ── 日期胶囊编辑：点击胶囊弹出浮层，选择即写回任务文本的 #日期 ──
+    const [dateEdit, setDateEdit] = useState(null); // { task, x, y } | null
+    const dateBoxRef = useRef(null);
+    const [dateBoxPos, setDateBoxPos] = useState(null); // 钳制后的坐标
+
+    // 浮层尺寸出来后钳制进视口（同 StateMenu 的做法）
+    useLayoutEffect(() => {
+        if (!dateEdit || !dateBoxRef.current) { setDateBoxPos(null); return; }
+        const el = dateBoxRef.current;
+        setDateBoxPos({
+            left: Math.max(8, Math.min(dateEdit.x, window.innerWidth - el.offsetWidth - 8)),
+            top: Math.max(8, Math.min(dateEdit.y, window.innerHeight - el.offsetHeight - 8))
+        });
+    }, [dateEdit]);
+
+    // 点击浮层外关闭（延迟绑定，避免打开浮层的同一次点击立即关闭）
+    useEffect(() => {
+        if (!dateEdit) return;
+        const onDocClick = e => {
+            if (dateBoxRef.current && dateBoxRef.current.contains(e.target)) return;
+            setDateEdit(null);
+        };
+        const t = setTimeout(() => document.addEventListener('click', onDocClick), 0);
+        return () => {
+            clearTimeout(t);
+            document.removeEventListener('click', onDocClick);
+        };
+    }, [dateEdit]);
+
+    function openDateEdit(e, task) {
+        e.stopPropagation();
+        const r = e.currentTarget.getBoundingClientRect();
+        setDateEdit({ task, x: r.left, y: r.bottom + 4 });
+    }
 
     // ── 拖拽排序：拖动中由入口在状态里实时移动行（等价原版的 DOM 移动），──
     // ── 松手后由入口提交排位到 localStorage                              ──
@@ -313,6 +396,17 @@ export function Dashboard({
         };
     }, [dragKey]);
 
+    // ── 右键任务文本：复制到剪贴板（成功短暂变色提示）──
+    function copyTaskText(e, text) {
+        e.preventDefault();
+        e.stopPropagation();
+        const el = e.currentTarget;
+        navigator.clipboard.writeText(text).then(() => {
+            el.classList.add('gtd-copied');
+            setTimeout(() => el.classList.remove('gtd-copied'), 600);
+        }).catch(err => console.error('复制失败：', err));
+    }
+
     // ── 单行任务 ──
     function renderTask(section, t, i) {
         const isFocus = section.key === 'doing';
@@ -334,7 +428,12 @@ export function Dashboard({
         if (completing) rowCls += ' gtd-row-leaving';
 
         return (
-            <div key={t.key} class={rowCls}>
+            <div
+                key={t.key}
+                class={rowCls}
+                onDragOver={e => handleRowDragOver(e, t)}
+                onDrop={e => { e.preventDefault(); finishDrag(); }}
+            >
                 {isFocus && (
                     <span
                         class="gtd-task-handle"
@@ -354,12 +453,21 @@ export function Dashboard({
                     }}
                 >✓</span>
 
-                {/* Preact 自动转义文本子节点，不要再手动 esc（会双重转义） */}
-                <span class={'gtd-task-text' + alertCls} onClick={() => onOpenTask(t)}>
+                {/* 左键进入任务；右键复制文本 */}
+                <span
+                    class={'gtd-task-text' + alertCls}
+                    onClick={() => onOpenTask(t)}
+                    onContextMenu={e => copyTaskText(e, t.text)}
+                >
                     {t.text}
                 </span>
 
-                {t.date ? <span class={'gtd-task-date' + dateCls}>{dateLabel}</span> : null}
+                {t.date ? (
+                    <span
+                        class={'gtd-task-date gtd-date-editable' + dateCls}
+                        onClick={e => openDateEdit(e, t)}
+                    >{dateLabel}</span>
+                ) : null}
 
                 <span class="gtd-task-src" onClick={() => onOpenNote(t.noteId)}>
                     {t.noteTitle}
@@ -402,6 +510,32 @@ export function Dashboard({
                     </div>
                 );
             })}
+
+            {/* 日期胶囊编辑浮层：选日期立即写回，点击浮层外取消 */}
+            {dateEdit && (
+                <div
+                    class="gtd-date-edit"
+                    ref={dateBoxRef}
+                    style={dateBoxPos
+                        ? { left: dateBoxPos.left + 'px', top: dateBoxPos.top + 'px' }
+                        : { visibility: 'hidden' }}
+                >
+                    <span class="gtd-date-edit-label">📅 任务日期</span>
+                    <input
+                        type="date"
+                        class="gtd-date-edit-input"
+                        value={dateEdit.task.date || ''}
+                        onChange={e => {
+                            onEditDate(dateEdit.task, e.target.value || null);
+                            setDateEdit(null);
+                        }}
+                    />
+                    <button class="gtd-date-edit-clear" onClick={() => {
+                        onEditDate(dateEdit.task, null);
+                        setDateEdit(null);
+                    }}>清除</button>
+                </div>
+            )}
         </div>
     );
 }

@@ -9,26 +9,56 @@
 //    - 不要用 ?? 和 ?.
 // ============================================================
 
-// ── 配置：检索范围（在此填写笔记 ID）──
-//   'noteId'   → 仅检索该笔记
-//   'noteId/'  → 检索该笔记及其全部子笔记
-export const SCOPE = [
-    'kfU2z6nbGrEe/'
-];
+// ── 笔记清单（唯一填 ID 的地方，按业务角色分组）──
+// 范围/排斥条目规则：'id' = 仅该笔记；'id/' = 该笔记及其全部子树
+export const NOTES = {
 
-// ── 配置：排斥列表（优先级高于 SCOPE），逻辑同 SCOPE ──
-export const EXCLUDE = [
-    '88QGFwlEXVz2/',
-    'quUL4mbpZIda/'
-];
+    // ── 项目 ──
+    // 项目文件夹：直接子笔记 = 处理收集箱时可选的项目
+    projectsRoot: 'kfU2z6nbGrEe',
+    // 暂停的项目：软排斥 —— 任务仍收集，面板只显示 进行中/等待中/带日期，
+    // 纯待办隐藏；处理收集箱时不可归入
+    projectsPaused: ['88QGFwlEXVz2/'],
+    // 归档的项目：硬排斥 —— 完全不收集，处理收集箱时不可归入
+    projectsArchive: ['quUL4mbpZIda/'],
 
-// ── 配置：收集箱 ──
-// Inbox 笔记 ID；收集箱视图与快速收集的目标是其下属的 Tasks 子笔记
-// （gtdGlobalCapture 启动脚本里有一份同样的配置，改动时两边同步）
-export const INBOX_NOTE_ID = 'yAaUbAqVYu3S';
+    // ── 收集箱 ──
+    inbox: 'yAaUbAqVYu3S',          // Inbox 笔记
+    inboxTasksTitle: 'Tasks',       // 其下的 Tasks 子笔记标题
 
-// Tasks 子笔记标题候选（按顺序匹配，大小写不敏感）
-export const INBOX_TASKS_TITLES = ['Tasks'];
+    // ── 北极星 North Star ──
+    // 其下 YYYYcW 编号最大者为当前年度笔记（如 2026c4），
+    // 处理收集箱时任务放入年度笔记下的 Quick Tasks 子笔记；
+    // Quick Tasks 在北极星子树内，面板检索自动涵盖，无需手动加入
+    northStar: 'pMGndJfTo79j',
+
+    // ── 其他目标 ──
+    maybe: 'cv1X2cJxnCb6',          // 将来/也许（不纳入面板检索）
+    // 额外纳入面板检索的独立笔记（一般留空）
+    watchExtra: [],
+
+    // ── 项目模板 ──
+    // 处理收集箱「设为项目」时，用该模板笔记（TriliumNext 标记 #template）
+    // 在项目文件夹下实例化新项目
+    projectTemplate: 'taNCN9j1TM8M'
+};
+
+// ── 派生配置（由 NOTES 统一生成）──
+
+// 排斥分两层：
+//   软排斥（暂停的项目）：内容仍收集，面板只显示 进行中 / 等待中 / 带日期 的任务，
+//                        纯待办（todo 且无日期）隐藏 —— parseNotes 里过滤
+//   硬排斥（归档的项目）：后端检索时直接剔除，完全不收集
+// 两层同时作用于处理收集箱的项目选择（暂停/归档均不可归入）
+
+// 软排斥：暂停的项目（后端只做标记，前端按状态过滤）
+export const PAUSED_SUBTREES = NOTES.projectsPaused;
+
+// 硬排斥：归档的项目（后端检索直接剔除）
+export const ARCHIVED_SUBTREES = NOTES.projectsArchive;
+
+// 处理收集箱项目选择排斥（暂停 + 归档）
+export const PROJECT_EXCLUDED = NOTES.projectsPaused.concat(NOTES.projectsArchive);
 
 // 可拖拽排序的分组（只有 Today's Focus 支持）
 export const SORTABLE_SECTION = 'doing';
@@ -67,8 +97,10 @@ export function todayStr() {
 // 从 checkbox 所在结构里取任务文本（兼容 label 包裹 / 无 label / 纯 li 三种写法）
 export function extractTaskText(input, li) {
 
-    // 1) Trilium 标准结构：<label class="todo-list__label"><input><span class="todo-list__label__description">
-    const label = input.closest('label');
+    // 1) Trilium 标准结构（两种写法都兼容）：
+    //    <label class="todo-list__label"><input><span class="todo-list__label__description">
+    //    <span class="todo-list__label"><span contenteditable="false"><input></span>…</span>
+    const label = input.closest('label') || input.closest('.todo-list__label');
     const desc = label && label.querySelector('.todo-list__label__description');
     if (desc) return desc.textContent;
 
@@ -133,6 +165,10 @@ export function parseNotes(rawNotes, today) {
             const dateMatch = text.match(DATE_RE);
             const date = dateMatch ? dateMatch[1] : null;
 
+            // 暂停的项目：软排斥，只保留 进行中 / 等待中 / 带日期 的任务，
+            // 纯待办（todo 且无日期）不显示
+            if (row.paused && state === 'todo' && !date) continue;
+
             // 文本中的 #日期 由日期标签统一展示，这里从文本中全部移除，避免重复
             const displayText = date
                 ? (normText(text.replace(DATE_GLOBAL_RE, '')) || date)
@@ -181,9 +217,9 @@ export function parseNotes(rawNotes, today) {
 // =========================================================
 // 收集箱：解析 Tasks 笔记内容 → 待处理条目（按文档顺序）
 // 跳过已勾选条目；checkboxIndex 是笔记内所有 checkbox 的序号，
-// 与写回端 writeTaskState 的定位口径一致，供后续"处理"操作使用
+// 与写回端 archiveTask 的定位口径一致，供后续"处理"操作使用
 // =========================================================
-export function parseInboxItems(content) {
+export function parseInboxItems(content, today = todayStr()) {
 
     if (!content) return [];
 
@@ -204,6 +240,10 @@ export function parseInboxItems(content) {
 
         const text = normText(extractTaskText(input, li));
         if (!text) continue;
+
+        // 择日再看：文本含 #yyyy-mm-dd 且日期未到的条目暂不列出（到期当天起重新显示）
+        const snoozeDate = (text.match(/#(\d{4}-\d{2}-\d{2})/) || [])[1];
+        if (snoozeDate && snoozeDate > today) continue;
 
         items.push({ checkboxIndex: idx, text });
     }
@@ -341,10 +381,11 @@ export function buildSections(allTasks, today, seqHidden) {
             key: 'todo',
             label: 'Next Actions',
             color: '#a6e3a1',
-            // 已进入 Today's Focus 的（今天/过期）不再重复显示，日历照常
+            // 只收不带日期的纯待办；带日期的任务属于 Calendar 分组，
+            // 日期到了自动进 Today's Focus，未来日期不进下一步行动
             tasks: allTasks.filter(t => t.state === 'todo'
                 && !seqHidden.has(t.key)
-                && t.date !== today && !t.overdue)
+                && !t.date)
         },
         {
             key: 'waiting',

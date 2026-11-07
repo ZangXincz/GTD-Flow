@@ -62,20 +62,24 @@ if (typeof gtdCore === 'undefined' || typeof gtdBackend === 'undefined'
 
 // ── 从各模块取能力（子笔记标题即全局变量名）──
 const {
-    SCOPE, EXCLUDE, SORTABLE_SECTION, STATE_MENU, ORDER_STEP,
+    NOTES, PAUSED_SUBTREES, ARCHIVED_SUBTREES, PROJECT_EXCLUDED,
+    SORTABLE_SECTION, STATE_MENU, ORDER_STEP,
     todayStr, normText, extractTaskText, DATE_GLOBAL_RE,
     parseNotes, computeSeqHidden, buildSections, readPageKey,
-    INBOX_NOTE_ID, INBOX_TASKS_TITLES, parseInboxItems,
+    parseInboxItems,
     loadOrderMap, saveOrderMap, pruneOrderMap, applyStoredOrder
 } = gtdCore;
 
-const { collectTasks, writeTaskState, collectInboxTasks } = gtdBackend;
+const {
+    collectTasks, archiveTask, setTaskDate, collectInboxTasks,
+    listProjects, resolveWeekTarget, moveInboxItem, createProjectFromTemplate
+} = gtdBackend;
 
 const dashboardMod = Dashboard;
 const { Dashboard: DashboardView, PANEL_CSS, StateMenu } = dashboardMod;
 
 const inboxMod = Inbox;
-const { Inbox: InboxView, INBOX_CSS } = inboxMod;
+const { Inbox: InboxView, INBOX_CSS, InboxProcess } = inboxMod;
 
 // ── 自动刷新策略（与原版一致）──
 const REFRESH_MIN_GAP = 5000;     // 两次自动刷新之间的最小间隔
@@ -159,6 +163,31 @@ function locateTaskElement(cbIndex, taskText) {
     return textMatchOnly;
 }
 
+// 把编辑器光标放到目标任务文本的末尾并聚焦编辑器，跳转后可直接输入
+// target: locateTaskElement 返回的 li 元素；失败静默跳过（不影响跳转本身）
+function placeCursorAtTaskEnd(target) {
+    try {
+        const editable = target.closest('.ck-editor__editable');
+        const editor = editable && editable.ckeditorInstance;
+        if (!editor) return;
+
+        // 目标任务文本 span（没有则退化为 li 末尾）
+        const desc = target.querySelector('span.todo-list__label__description') || target;
+
+        // DOM → 编辑器 view → model 位置
+        const viewEl = editor.editing.view.domConverter.domToView(desc);
+        if (!viewEl || typeof viewEl.childCount !== 'number') return;
+        const viewPos = editor.editing.view.createPositionAt(viewEl, 'end');
+        const modelPos = editor.editing.mapper.toModelPosition(viewPos);
+        if (!modelPos) return;
+
+        editor.model.change(writer => writer.setSelection(modelPos));
+        editor.editing.view.focus();
+    } catch (e) {
+        console.error(e);
+    }
+}
+
 async function openTaskAtPosition(noteId, cbIndex, taskText) {
 
     const token = ++openToken;
@@ -181,6 +210,9 @@ async function openTaskAtPosition(noteId, cbIndex, taskText) {
         if (!target) await sleep(100);
     }
     if (!target) return;
+
+    // 光标放到任务文本末尾并聚焦编辑器，跳转即可直接编辑
+    placeCursorAtTaskEnd(target);
 
     target.scrollIntoView({ behavior: 'auto', block: 'center' });
 
@@ -256,6 +288,7 @@ export default function GtdMain() {
     // 长生命周期 / 跨闭包状态用 ref 存，避免异步回调读到旧值
     const loadSeqRef = useRef(0);          // 并发 load 时只允许最新一次写入
     const lastLoadAtRef = useRef(0);       // 上次成功加载时间
+    const weekInfoRef = useRef(null);      // Quick Tasks / Archive 解析结果（完成归档用）
     const refreshingRef = useRef(false);
     const pointerDownAtRef = useRef(0);
     const lastPointerUpAtRef = useRef(0);
@@ -274,7 +307,7 @@ export default function GtdMain() {
 
         const seq = ++loadSeqRef.current;
 
-        if (SCOPE.length === 0) {
+        if (!NOTES.projectsRoot || NOTES.projectsRoot.indexOf('填写') >= 0) {
             setStatus('config');
             return;
         }
@@ -284,7 +317,14 @@ export default function GtdMain() {
         try {
 
             // ── Backend：收集范围内的未完成任务 ──
-            const rawNotes = (await collectTasks(runOnBackend, SCOPE, EXCLUDE)) || [];
+            // 北极星只取其下年度笔记（YYYYcW 编号最大者）的 Quick Tasks 子笔记，
+            // North Star 与年度笔记本身的任务不显示
+            const week = await resolveWeekTarget(runOnBackend, NOTES.northStar);
+            weekInfoRef.current = week; // Quick Tasks / Archive ID（完成归档用）
+            const scope = [NOTES.projectsRoot + '/', week.noteId]
+                .concat(NOTES.watchExtra);
+
+            const rawNotes = (await collectTasks(runOnBackend, scope, ARCHIVED_SUBTREES, PAUSED_SUBTREES)) || [];
 
             // 已有更新的加载发起，丢弃本次结果
             if (seq !== loadSeqRef.current) return;
@@ -343,8 +383,14 @@ export default function GtdMain() {
 
         try {
 
-            // Backend：标记完成（勾选 input + 移除 li 上的状态属性）
-            await writeTaskState(runOnBackend, task.noteId, task.checkboxIndex, 'done', null);
+            // Backend：标记完成（勾选 + #done: 时间戳；Quick Tasks 里的移入
+            // Archive 倒序，项目任务刷新 Archive 的「处理了 项目 ×N」记录）
+            const info = weekInfoRef.current;
+            await archiveTask(runOnBackend, task.noteId, task.checkboxIndex, 'done', null, {
+                archiveNoteId: info ? info.archiveId : null,
+                quickNoteId: info ? info.noteId : null,
+                projectsRoot: NOTES.projectsRoot
+            });
 
             // UI：等淡出动画结束后静默刷新（任务可能同时出现在多个分组）
             setTimeout(() => {
@@ -368,9 +414,15 @@ export default function GtdMain() {
         if (!current) return;
 
         try {
-            await writeTaskState(
+            // 状态切换（含完成/取消：加时间戳、Quick Tasks 归档、项目记录刷新）
+            const info = weekInfoRef.current;
+            await archiveTask(
                 runOnBackend,
-                current.task.noteId, current.task.checkboxIndex, item.value, item.label);
+                current.task.noteId, current.task.checkboxIndex, item.value, item.label, {
+                archiveNoteId: info ? info.archiveId : null,
+                quickNoteId: info ? info.noteId : null,
+                projectsRoot: NOTES.projectsRoot
+            });
 
             // 按当前视图刷新对应数据（收集箱设为待定/已取消后条目会消失）
             if (pageRef.current === 'inbox') await loadInbox(true);
@@ -384,6 +436,18 @@ export default function GtdMain() {
     // ── 点击任务文本：打开笔记并闪烁定位 ──
     function handleOpenTask(task) {
         openTaskAtPosition(task.noteId, task.checkboxIndex, task.text);
+    }
+
+    // ── 日期胶囊编辑：改任务文本中的 #日期（date 为 null = 清除）──
+    // 写回后静默刷新（任务可能因此换分组：Calendar / Today's Focus）
+    async function handleEditDate(task, date) {
+        try {
+            await setTaskDate(runOnBackend, task.noteId, task.checkboxIndex, date);
+            await load(true);
+        } catch (err) {
+            console.error(err);
+            alert('修改日期失败：' + ((err && err.message) || err));
+        }
     }
 
     // ── 点击来源笔记名：打开笔记 ──
@@ -448,19 +512,19 @@ export default function GtdMain() {
 
         const seq = ++inboxSeqRef.current;
 
-        if (!INBOX_NOTE_ID || INBOX_NOTE_ID.indexOf('填写') >= 0) {
+        if (!NOTES.inbox || NOTES.inbox.indexOf('填写') >= 0) {
             setInboxStatus('error');
-            setInboxError('请先在 gtdCore 顶部配置 INBOX_NOTE_ID（Inbox 笔记 ID）');
+            setInboxError('请先在 gtdCore 的 NOTES.inbox 配置 Inbox 笔记 ID');
             return;
         }
 
         if (!silent) setInboxStatus('loading');
 
         try {
-            const raw = await collectInboxTasks(runOnBackend, INBOX_NOTE_ID, INBOX_TASKS_TITLES);
+            const raw = await collectInboxTasks(runOnBackend, NOTES.inbox, [NOTES.inboxTasksTitle]);
             if (seq !== inboxSeqRef.current) return;
             inboxNoteRef.current = raw.noteId;
-            setInboxItems(parseInboxItems(raw.content));
+            setInboxItems(parseInboxItems(raw.content, todayStr()));
             setInboxStatus('ready');
             lastInboxLoadAtRef.current = Date.now();
         } catch (err) {
@@ -473,9 +537,187 @@ export default function GtdMain() {
         }
     }
 
-    // ── 收集箱"处理收集箱"按钮（功能后续接入）──
-    function handleInboxProcess() {
-        alert('处理收集箱：功能开发中');
+    // =========================================================
+    // 处理收集箱（引导式）
+    // 逐条：可执行 → 已完成 / 下一步 / 等待 → 选择项目并移动
+    // 每次操作后重载收集箱，下一条自动滑入同一下标位置
+    // =========================================================
+    const [processing, setProcessing] = useState(false);
+    const [procIndex, setProcIndex] = useState(0);   // 当前处理到第几条
+    const [procBusy, setProcBusy] = useState(false);
+    const [procError, setProcError] = useState('');
+    const [projList, setProjList] = useState([]);    // 可归入的项目
+    const [projLoading, setProjLoading] = useState(false);
+    const [projError, setProjError] = useState('');
+
+    const processingRef = useRef(false);
+    useEffect(() => { processingRef.current = processing; }, [processing]);
+
+    // ── 项目清单（进入处理模式时加载一次）──
+    async function loadProjects() {
+
+        if (!NOTES.projectsRoot || String(NOTES.projectsRoot).indexOf('填写') >= 0) {
+            setProjError('请先在 gtdCore 的 NOTES.projectsRoot 配置项目文件夹笔记 ID');
+            return;
+        }
+
+        setProjLoading(true);
+        setProjError('');
+
+        try {
+            const list = await listProjects(runOnBackend, NOTES.projectsRoot, PROJECT_EXCLUDED);
+            setProjList(list);
+        } catch (err) {
+            console.error(err);
+            setProjError(String((err && err.message) || err));
+        } finally {
+            setProjLoading(false);
+        }
+    }
+
+    function openProcess() {
+        setProcIndex(0);
+        setProcError('');
+        setProcessing(true);
+        loadProjects();
+    }
+
+    function exitProcess() {
+        setProcessing(false);
+        setProcError('');
+    }
+
+    // 条目用尽（处理完 / 跳过最后一条）时自动退出处理模式，
+    // 不再显示「本轮处理结束」的点击退出屏
+    useEffect(() => {
+        if (processing && procIndex >= inboxItems.length) exitProcess();
+    }, [processing, procIndex, inboxItems]);
+
+    // 跳过：不操作当前条目，直接看下一条（内容未变，无需重载）
+    function skipItem() {
+        setProcError('');
+        setProcIndex(i => i + 1);
+    }
+
+    // ── 提交当前条目的处理结果（只有点「下一步」才会进来）──
+    // choice = { mode: 'done', title, desc }
+    //        | { mode: 'move', title, desc, date, delegate, projectId }
+    //        | { mode: 'delete' }
+    //        | { mode: 'maybe' }
+    //        | { mode: 'snooze', date }
+    // 所有独立任务的去向：未完成 → Quick Tasks；完成/取消 → Archive（倒序，
+    // 加 #done:/#cancelled: 时间戳）；「下一步 / 等待」选了项目则进项目待分配
+    // 任务；「将来/也许」进 NOTES.maybe 指定文件
+    async function submitCurrent(choice) {
+
+        const item = inboxItems[procIndex];
+        if (!item) return;
+
+        setProcBusy(true);
+        setProcError('');
+
+        try {
+
+            // 择日再看：不移入，原地给任务文本追加 #yyyy-mm-dd（到期前收集箱不显示）
+            if (choice.mode === 'snooze') {
+                await setTaskDate(runOnBackend, inboxNoteRef.current,
+                    item.checkboxIndex, choice.date);
+                await loadInbox(true);
+                return;
+            }
+
+            // 设为项目：用模板在项目文件夹下实例化新项目（项目名 = 任务标题），
+            // 再把本任务移入新项目的「待分配任务」末尾
+            if (choice.mode === 'makeProject') {
+                if (!NOTES.projectsRoot || String(NOTES.projectsRoot).indexOf('填写') >= 0) {
+                    throw new Error('需要先在 gtdCore 的 NOTES.projectsRoot 配置项目文件夹笔记 ID');
+                }
+                if (!NOTES.projectTemplate) {
+                    throw new Error('需要先在 gtdCore 的 NOTES.projectTemplate 配置项目模板笔记 ID');
+                }
+                const proj = await createProjectFromTemplate(runOnBackend,
+                    NOTES.projectsRoot, NOTES.projectTemplate, choice.title);
+                await moveInboxItem(runOnBackend, inboxNoteRef.current,
+                    item.checkboxIndex, proj.noteId, {
+                        text: choice.title,
+                        desc: choice.desc,
+                        atEnd: true // 移入新项目的「待分配任务」标题下列表末尾
+                    });
+                await loadInbox(true);
+                loadProjects(); // 项目列表刷新（新项目立即可选）
+                return;
+            }
+
+            // 确保周信息（Quick Tasks / Archive）已解析
+            let weekInfo = weekInfoRef.current;
+            if (!weekInfo || !weekInfo.noteId) {
+                if (!NOTES.northStar || String(NOTES.northStar).indexOf('填写') >= 0) {
+                    throw new Error('需要先在 gtdCore 的 NOTES.northStar 配置北极星笔记 ID');
+                }
+                weekInfo = await resolveWeekTarget(runOnBackend, NOTES.northStar);
+                weekInfoRef.current = weekInfo;
+            }
+
+            // 删除/将来也许：保留原文原样，仅状态标记（cancelled / maybe）；
+            // 其他情况标题用编辑后的内容（不再带快速收集的时间前缀），
+            // 安排日期写成 #yyyy-mm-dd（进面板 Calendar 分组）
+            let text;
+            if (choice.mode === 'delete' || choice.mode === 'maybe') {
+                text = item.text;
+            } else {
+                text = choice.title;
+                if (choice.mode === 'move' && choice.date) text = text + ' #' + choice.date;
+            }
+
+            let targetId;
+            const isClosed = choice.mode === 'done' || choice.mode === 'delete';
+            if (choice.mode === 'move') {
+                targetId = choice.projectId;
+            } else if (choice.mode === 'maybe') {
+                if (!NOTES.maybe || String(NOTES.maybe).indexOf('填写') >= 0) {
+                    throw new Error('需要先在 gtdCore 的 NOTES.maybe 配置将来/也许目标文件');
+                }
+                targetId = NOTES.maybe;
+            } else {
+                // done / delete → 移入 Archive（倒序，最新在最上）
+                if (!weekInfo.archiveId) {
+                    throw new Error('年度笔记「' + weekInfo.title
+                        + '」同级没有 Archive 子笔记，请手动创建（标题 Archive）后再试');
+                }
+                targetId = weekInfo.archiveId;
+            }
+
+            if (!targetId) {
+                // move 未选项目 → Quick Tasks（未完成区末尾）
+                targetId = weekInfo.noteId;
+            }
+
+            await moveInboxItem(runOnBackend, inboxNoteRef.current,
+                item.checkboxIndex, targetId, {
+                    text,
+                    desc: choice.desc,
+                    // 移入项目 → 待分配任务末尾；将来也许 → 最后列表末尾；
+                    // 完成/取消 → Archive 倒序 + 时间戳；Quick Tasks → 未完成区末尾
+                    atEnd: choice.mode === 'move' && !!choice.projectId,
+                    appendEnd: choice.mode === 'maybe',
+                    prepend: isClosed,
+                    stamp: isClosed,
+                    state: choice.mode === 'done' ? 'done'
+                        : choice.mode === 'delete' ? 'cancelled'
+                        : choice.mode === 'maybe' ? 'maybe'
+                        : (choice.delegate ? 'waiting' : null),
+                    stateLabel: choice.mode === 'delete' ? '已取消'
+                        : choice.mode === 'maybe' ? '待定'
+                        : (choice.delegate ? '等待中' : null)
+                });
+            await loadInbox(true);
+
+        } catch (err) {
+            console.error(err);
+            setProcError(String((err && err.message) || err));
+        } finally {
+            setProcBusy(false);
+        }
     }
 
     // ── 收集箱勾选完成：与面板左键完成同一写回出口，写后静默刷新 ──
@@ -485,7 +727,13 @@ export default function GtdMain() {
         if (!noteId) return;
 
         try {
-            await writeTaskState(runOnBackend, noteId, item.checkboxIndex, 'done', null);
+            // 收集箱任务不在 Quick Tasks / 项目子树：纯状态写回 + #done: 时间戳
+            const info = weekInfoRef.current;
+            await archiveTask(runOnBackend, noteId, item.checkboxIndex, 'done', null, {
+                archiveNoteId: info ? info.archiveId : null,
+                quickNoteId: info ? info.noteId : null,
+                projectsRoot: NOTES.projectsRoot
+            });
             await loadInbox(true);
         } catch (err) {
             console.error(err);
@@ -505,10 +753,22 @@ export default function GtdMain() {
     async function autoRefresh() {
 
         if (refreshingRef.current) return;
+        if (processingRef.current) return; // 处理收集箱中不自动刷新（避免列表移位）
 
         // ── 收集箱视图：回到页面 / 定期同步时刷新收集箱列表 ──
+        // 打断条件与任务面板分支保持一致（收集箱没有拖拽，无 dragActive 检查）
         if (pageRef.current === 'inbox') {
-            if (menuRef.current) return; // 状态菜单打开中
+            if (menuRef.current) return;               // 状态菜单打开中
+            if (!isPanelVisible()) return;             // 面板不可见（在别的笔记里）
+
+            // 切笔记 / 拖到窗口外时 pointerup 可能丢失，超时就当作已松开
+            if (pointerDownAtRef.current
+                && performance.now() - pointerDownAtRef.current > STUCK_POINTER_MS) {
+                pointerDownAtRef.current = 0;
+            }
+            if (pointerDownAtRef.current) return;      // 点击进行中
+            if (performance.now() - lastPointerUpAtRef.current < POINTER_COOLDOWN) return;
+
             if (Date.now() - lastInboxLoadAtRef.current < REFRESH_MIN_GAP) return;
             refreshingRef.current = true;
             try {
@@ -602,9 +862,11 @@ export default function GtdMain() {
             }
             panelWasVisible = visible;
 
-            // 一直开着也要定期同步
-            if (visible && pageRef.current === 'dashboard'
-                && Date.now() - lastLoadAtRef.current >= REFRESH_IDLE_GAP) {
+            // 一直开着也要定期同步（任务面板 / 收集箱视图一致）
+            if (visible && (pageRef.current === 'dashboard' || pageRef.current === 'inbox')
+                && Date.now() - (pageRef.current === 'dashboard'
+                    ? lastLoadAtRef.current
+                    : lastInboxLoadAtRef.current) >= REFRESH_IDLE_GAP) {
                 autoRefresh();
             }
         }, WATCH_INTERVAL);
@@ -657,6 +919,7 @@ export default function GtdMain() {
                             onComplete={handleComplete}
                             onOpenTask={handleOpenTask}
                             onOpenNote={handleOpenNote}
+                            onEditDate={handleEditDate}
                             onDragStart={handleDragStart}
                             onDragOverRow={handleDragOverRow}
                             onDragEnd={handleDragEnd}
@@ -665,26 +928,44 @@ export default function GtdMain() {
             )}
 
             {page === 'inbox' && (
-                <InboxView
-                    status={inboxStatus}
-                    items={inboxItems}
-                    errorText={inboxError}
-                    onProcess={handleInboxProcess}
-                    onComplete={handleInboxComplete}
-                    onMenuOpen={(item, x, y) => setMenu({
-                        task: {
+                processing ? (
+                    <InboxProcess
+                        key={procIndex + ':' + (inboxItems[procIndex]
+                            ? inboxItems[procIndex].checkboxIndex + ':' + inboxItems[procIndex].text
+                            : 'none')}
+                        item={inboxItems[procIndex] || null}
+                        remaining={Math.max(0, inboxItems.length - procIndex)}
+                        busy={procBusy}
+                        errorText={procError}
+                        projects={projList}
+                        projectsLoading={projLoading}
+                        projectError={projError}
+                        onExit={exitProcess}
+                        onSkip={skipItem}
+                        onSubmit={submitCurrent}
+                    />
+                ) : (
+                    <InboxView
+                        status={inboxStatus}
+                        items={inboxItems}
+                        errorText={inboxError}
+                        onProcess={openProcess}
+                        onComplete={handleInboxComplete}
+                        onMenuOpen={(item, x, y) => setMenu({
+                            task: {
+                                noteId: inboxNoteRef.current,
+                                checkboxIndex: item.checkboxIndex,
+                                text: item.text
+                            },
+                            x, y
+                        })}
+                        onOpenTask={item => handleOpenTask({
                             noteId: inboxNoteRef.current,
                             checkboxIndex: item.checkboxIndex,
                             text: item.text
-                        },
-                        x, y
-                    })}
-                    onOpenTask={item => handleOpenTask({
-                        noteId: inboxNoteRef.current,
-                        checkboxIndex: item.checkboxIndex,
-                        text: item.text
-                    })}
-                />
+                        })}
+                    />
+                )
             )}
 
             {/* 状态菜单：两个视图共用（右键任务勾选框呼出） */}

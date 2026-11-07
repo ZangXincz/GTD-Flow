@@ -13,7 +13,8 @@
 //    所以下面的配置与写入逻辑是复制的一份，改动时两边要同步。
 // ============================================================
 
-// ── 配置：与 gtdCore 保持一致 ──
+// ── 配置：与 gtdCore 的 NOTES.inbox / NOTES.inboxTasksTitle 保持一致
+//    （独立启动脚本无法引用子笔记模块，改动时两边同步）──
 const INBOX_NOTE_ID = 'yAaUbAqVYu3S';
 const INBOX_TASKS_TITLES = ['Tasks'];
 
@@ -76,20 +77,12 @@ const INBOX_TASKS_TITLES = ['Tasks'];
         errorBox.style.display = 'block';
     }
 
-    // ── 时间前缀：'YYYY-MM-DD HH:mm '（与 gtdCore.capturePrefix 一致，
-    //    刻意不用 #日期 格式，避免被任务面板解析成 Calendar 日历任务）──
-    function capturePrefix(now) {
-        const p = n => String(n).padStart(2, '0');
-        return now.getFullYear() + '-' + p(now.getMonth() + 1) + '-' + p(now.getDate())
-            + ' ' + p(now.getHours()) + ':' + p(now.getMinutes()) + ' ';
-    }
-
     // ── 写入 Inbox 下属 Tasks 笔记（gtdBackend.captureToInbox 的自带副本，
     //    runOnBackend 函数体在后端执行，必须自包含）──
+    // 只写纯文本，不加时间前缀
     async function writeToTasks(text) {
-        const prefix = capturePrefix(new Date());
 
-        await api.runOnBackend((text, inboxNoteId, childTitles, prefix) => {
+        await api.runOnBackend((text, inboxNoteId, childTitles) => {
 
             const parent = api.getNote(inboxNoteId);
             if (!parent) throw new Error('未找到 Inbox 笔记（检查脚本顶部 INBOX_NOTE_ID）');
@@ -111,10 +104,13 @@ const INBOX_TASKS_TITLES = ['Tasks'];
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;');
 
-            const li = '<li><label class="todo-list__label">'
-                + '<input type="checkbox">'
-                + '<span class="todo-list__label__description">' + prefix + safe + '</span>'
-                + '</label></li>';
+            // 结构与 CKEditor/Trilium 实际保存格式一致（span 版，非 label 版）
+            const li = '<li>'
+                + '<span class="todo-list__label">'
+                + '<span contenteditable="false"><input type="checkbox" tabindex="-1"></span>'
+                + '<span class="todo-list__label__description">' + safe + '</span>'
+                + '</span>'
+                + '</li>';
 
             let content = String(target.getContent());
 
@@ -129,7 +125,7 @@ const INBOX_TASKS_TITLES = ['Tasks'];
 
             target.setContent(content);
 
-        }, [text, INBOX_NOTE_ID, INBOX_TASKS_TITLES, prefix]);
+        }, [text, INBOX_NOTE_ID, INBOX_TASKS_TITLES]);
     }
 
     // ── 提交 ──
