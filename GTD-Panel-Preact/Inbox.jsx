@@ -12,7 +12,7 @@
 //  注意：不要用 ?? 和 ?.
 // ============================================================
 
-import { useState } from "trilium:preact";
+import { useState, useRef, useEffect } from "trilium:preact";
 
 export const INBOX_CSS = `
     /* 主行动按钮：通栏长条，占满宽度、蓝底白字居中 */
@@ -311,11 +311,16 @@ export const INBOX_CSS = `
         font-weight: 600;
     }
     .gtd-proc-wide-btn.gtd-wide-done:hover:enabled { filter: brightness(1.08); }
-    /* 项目下拉：去掉原生箭头，只保留自定义的单个 chevron
-       （避免 Trilium 主题箭头 + 原生箭头出现两个小三角） */
+    /* 项目下拉（自绘）：Trilium 渲染 iframe 里原生 select 弹层常被
+       父页焦点处理干扰（点一下就收起），改为按钮 + 内联浮层 */
+    .gtd-proc-select-wrap {
+        position: relative;
+    }
     .gtd-proc-select {
+        display: block;
         width: 100%;
         box-sizing: border-box;
+        text-align: left;
         background: var(--main-background-color, #1e1e2e);
         border: 1px solid var(--main-border-color, #45475a);
         border-radius: 8px;
@@ -325,6 +330,7 @@ export const INBOX_CSS = `
         padding: 9px 30px 9px 12px;
         outline: none;
         cursor: pointer;
+        /* 只保留自定义的单个 chevron */
         -webkit-appearance: none;
         appearance: none;
         background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
@@ -333,6 +339,43 @@ export const INBOX_CSS = `
     }
     .gtd-proc-select:focus {
         border-color: var(--active-item-background-color, #a6e3a1);
+    }
+    .gtd-proc-select-menu {
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        right: 0;
+        z-index: 30;
+        max-height: 240px;
+        overflow-y: auto;
+        padding: 4px;
+        background: var(--main-background-color, #1e1e2e);
+        border: 1px solid var(--main-border-color, #45475a);
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+    }
+    .gtd-proc-option {
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+        text-align: left;
+        border: none;
+        background: transparent;
+        color: var(--main-text-color);
+        font-family: inherit;
+        font-size: 14px;
+        line-height: 1.5;
+        padding: 8px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        word-break: break-all;
+    }
+    .gtd-proc-option:hover {
+        background: rgba(128, 128, 128, .18);
+    }
+    .gtd-proc-option.gtd-opt-sel {
+        background: #2563eb;
+        color: #fff;
     }
     /* 日期快捷按钮 */
     .gtd-proc-date-quick {
@@ -477,7 +520,43 @@ export function InboxProcess({
     const [who, setWho] = useState(null);           // me | other（委派 → 等待中）
     const [asProject, setAsProject] = useState(false); // 选中「设为项目」（与 who 三选一）
     const [projectId, setProjectId] = useState(''); // '' = 不归入项目
+    const [projOpen, setProjOpen] = useState(false); // 自绘项目下拉展开中
+    const projWrapRef = useRef(null);
     const [tip, setTip] = useState('');
+    // Escape 分流用：下拉展开时先关下拉，再按一次才退出处理
+    const projOpenRef = useRef(projOpen);
+    projOpenRef.current = projOpen;
+
+    // Escape 退出处理模式（相当于点右上角 ×）；下拉展开时不退出，
+    // 由下方 effect 先关下拉（该监听后注册，晚于下拉的 Escape 处理）
+    useEffect(() => {
+        const onKey = e => {
+            if (e.key !== 'Escape') return;
+            if (projOpenRef.current) return;
+            onExit();
+        };
+        document.addEventListener('keydown', onKey);
+        return () => document.removeEventListener('keydown', onKey);
+    }, []);
+
+    // 下拉展开时：点击外部 / Escape 关闭（mousedown 先于按钮 click，选外部即收起）
+    useEffect(() => {
+        if (!projOpen) return;
+        const onDoc = e => {
+            if (projWrapRef.current && !projWrapRef.current.contains(e.target)) {
+                setProjOpen(false);
+            }
+        };
+        const onKey = e => {
+            if (e.key === 'Escape') setProjOpen(false);
+        };
+        document.addEventListener('mousedown', onDoc);
+        document.addEventListener('keydown', onKey);
+        return () => {
+            document.removeEventListener('mousedown', onDoc);
+            document.removeEventListener('keydown', onKey);
+        };
+    }, [projOpen]);
 
     // 条目用尽时入口层会自动退出处理模式（这里不渲染任何东西）
     if (!item) return null;
@@ -602,6 +681,12 @@ export function InboxProcess({
     // 独占选项（删除/将来也许/择日再看/参考资料）与「可执行」路线互斥
     const unary = exec === 'delete' || exec === 'maybe'
         || exec === 'snooze' || exec === 'reference';
+
+    // 自绘下拉按钮上显示的当前选择文本
+    let projSelectedText = '不归入项目（移入本年 Quick Tasks）';
+    for (const p of projects) {
+        if (p.noteId === projectId) { projSelectedText = p.title; break; }
+    }
     const canSubmit = !busy && (
         (unary && (exec !== 'snooze' || !!date)) ||
         (canAct && !!String(title).trim() && (
@@ -774,16 +859,39 @@ export function InboxProcess({
 
                         <div class="gtd-proc-field">
                             <div class="gtd-proc-label">项目（可选）</div>
-                            <select
-                                class="gtd-proc-select"
-                                value={projectId}
-                                onChange={e => setProjectId(e.target.value)}
-                            >
-                                <option value="">不归入项目（移入本年 Quick Tasks）</option>
-                                {projects.map(p => (
-                                    <option key={p.noteId} value={p.noteId}>{p.title}</option>
-                                ))}
-                            </select>
+                            {/* Trilium 渲染 iframe 里原生 select 弹层常被父页焦点处理
+                                干扰（点一下就收起，总要点两次），改为自绘下拉 */}
+                            <div class="gtd-proc-select-wrap" ref={projWrapRef}>
+                                <button
+                                    type="button"
+                                    class="gtd-proc-select"
+                                    disabled={busy}
+                                    onClick={() => setProjOpen(!projOpen)}
+                                >{projSelectedText}</button>
+
+                                {projOpen ? (
+                                    <div class="gtd-proc-select-menu">
+                                        <button
+                                            type="button"
+                                            class={'gtd-proc-option'
+                                                + (!projectId ? ' gtd-opt-sel' : '')}
+                                            onClick={() => { setProjectId(''); setProjOpen(false); }}
+                                        >不归入项目（移入本年 Quick Tasks）</button>
+                                        {projects.map(p => (
+                                            <button
+                                                type="button"
+                                                key={p.noteId}
+                                                class={'gtd-proc-option'
+                                                    + (projectId === p.noteId ? ' gtd-opt-sel' : '')}
+                                                onClick={() => {
+                                                    setProjectId(p.noteId);
+                                                    setProjOpen(false);
+                                                }}
+                                            >{p.title}</button>
+                                        ))}
+                                    </div>
+                                ) : null}
+                            </div>
 
                             {projectsLoading ? (
                                 <div class="gtd-proc-question-sub">正在加载项目…</div>

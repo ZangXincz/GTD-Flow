@@ -552,10 +552,21 @@ export function listProjects(runOnBackend, rootId, excludeIds) {
         const projects = [];
         for (const child of root.getChildNotes()) {
             if (excluded.has(child.noteId)) continue;
-            projects.push({ noteId: child.noteId, title: child.title || '(无标题)' });
+            projects.push({
+                noteId: child.noteId,
+                title: child.title || '(无标题)',
+                dateModified: String(child.dateModified || '')
+            });
         }
 
-        projects.sort((a, b) => a.title.localeCompare(b.title));
+        // 按项目最后修改时间倒序（最近改过的排前面），无时间戳的排最后；
+        // 同时间再用标题升序保持稳定
+        projects.sort((a, b) => {
+            if (a.dateModified !== b.dateModified) {
+                return a.dateModified < b.dateModified ? 1 : -1;
+            }
+            return a.title.localeCompare(b.title);
+        });
         return projects;
 
     }, [rootId, excludeIds]);
