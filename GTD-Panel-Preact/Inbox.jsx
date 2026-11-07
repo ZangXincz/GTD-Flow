@@ -649,8 +649,9 @@ export function InboxProcess({
                     <button class="gtd-proc-opt" disabled={busy} onClick={pickNotReady}>📄 参考资料</button>
                 </div>
 
-                {/* 择日再看：只选日期（无时间），任务留原地，到期才重新显示 */}
-                {canAct && exec === 'snooze' && (
+                {/* 择日再看：只选日期（无时间），任务留原地，到期才重新显示
+                    （独占选项，不依赖 canAct —— pickSnooze 会把 canAct 置 false） */}
+                {exec === 'snooze' && (
                     <div>
                         <div class="gtd-proc-question">哪天再看？</div>
                         <div class="gtd-proc-question-sub">

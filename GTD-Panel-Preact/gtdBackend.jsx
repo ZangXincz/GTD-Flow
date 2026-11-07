@@ -119,9 +119,11 @@ export function collectTasks(runOnBackend, scope, exclude, paused) {
 //   任务在项目子树里 → 刷新 Archive 的项目处理记录（已勾选任务形式，
 //   文本「今日 项目 完成 N 个任务」+ #done:时间戳；重新统计，幂等）
 // opts: { archiveNoteId, quickNoteId, projectsRoot }，字段可为 null（跳过对应分支）
+// text: 面板端任务文本，写盘前与 li 实际文本比对（防止面板数据过期按序号改错
+//       条目）；为空则跳过校验
 // runOnBackend: 由入口从 "trilium:api" 注入
-export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts) {
-    return runOnBackend((noteId, cbIndex, state, label, opts) => {
+export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, text) {
+    return runOnBackend((noteId, cbIndex, state, label, opts, text) => {
 
         const isDone = state === 'done';
         const isClosed = isDone || state === 'cancelled';
@@ -170,6 +172,29 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts) {
 
         // ── 2) 修改 li：文本时间戳 + 状态属性 + input 勾选 ──
         let liHtml = content.slice(liStart, liEnd);
+
+        // 文本校验：预期文本与 li 实际文本不一致时拒绝写盘。
+        // 面板数据过期（操作前笔记已被编辑，checkbox 序号错位）时，
+        // 与其按序号改错条目，不如直接报错让用户刷新面板
+        const normLiText = s => String(s)
+            .replace(/<[^>]*>/g, '')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/&amp;/gi, '&')
+            .replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>')
+            .replace(/&quot;/gi, '"')
+            .replace(/#(?:done|cancelled):\d{4}-\d{2}-\d{2} \d{2}-\d{2}/g, '')
+            .replace(/#\d{4}-\d{2}-\d{2}/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const expectedText = normLiText(text);
+        if (expectedText) {
+            const chk = liHtml.match(
+                /<span class="todo-list__label__description"[^>]*>([\s\S]*?)<\/span>/i);
+            if (chk && normLiText(chk[1]) !== expectedText) {
+                throw new Error('任务内容已变化，面板数据可能过期，请刷新面板后重试');
+            }
+        }
 
         // 文本：移除旧时间戳，done/cancelled 追加新的
         const descRe = /(<span class="todo-list__label__description"[^>]*>)([\s\S]*?)(<\/span>)/i;
@@ -243,8 +268,10 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts) {
             }
             archiveNote.setContent(newArchive);
 
-            // 从源笔记删除该 li（源已写盘更新，这里基于新内容删除）
-            note.setContent(closedContent.slice(0, liStart) + closedContent.slice(liEnd));
+            // 从源笔记删除该 li（源已写盘更新，这里基于新内容删除），
+            // 并清掉紧跟的换行空白，避免残留空行（与 moveInboxItem 行为一致）
+            note.setContent(closedContent.slice(0, liStart)
+                + closedContent.slice(liEnd).replace(/^\s*\n/, ''));
             moved = true;
         }
 
@@ -267,24 +294,50 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts) {
             if (projectId) {
                 const proj = api.getNote(projectId);
                 if (proj) {
-                    // 重新统计项目子树中带完成时间戳的任务数（幂等：撤销会自动减）
-                    let count = 0;
+                    const today = stamp.substring(0, 10);
+                    const escTitle = String(proj.title || '未命名项目')
+                        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+                    // ── 1) 当天新增数：只数项目子树里带「今天」日期的时间戳 ──
+                    //    删除历史任务不影响这个数（历史时间戳日期不是今天）
+                    const todayStampRe = new RegExp(
+                        '#(?:done|cancelled):' + today + ' \\d{2}-\\d{2}', 'g');
+                    let todayCount = 0;
                     const stack = [proj];
                     while (stack.length) {
                         const cur = stack.pop();
                         const c = String(cur.getContent());
-                        const cm = c.match(/#(?:done|cancelled):\d{4}-\d{2}-\d{2} \d{2}-\d{2}/g);
-                        if (cm) count += cm.length;
+                        const cm = c.match(todayStampRe);
+                        if (cm) todayCount += cm.length;
                         stack.push.apply(stack, cur.getChildNotes());
                     }
-
-                    const escTitle = String(proj.title || '未命名项目')
-                        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                    const recordText = '今日 ' + escTitle + ' 完成 ' + count + ' 个任务';
 
                     const archiveNote = api.getNote(opts.archiveNoteId);
                     if (!archiveNote) throw new Error('未找到 Archive 笔记：' + opts.archiveNoteId);
                     let ac = String(archiveNote.getContent());
+
+                    // ── 2) 基数：该项目最近一条「今天之前」记录的数字（只读不写）──
+                    //    记录形如「今日 TITLE 完成 N 个任务 #done:YYYY-MM-DD HH-mm」；
+                    //    历史记录是快照，永远不会被改写，删除历史任务/记录后，
+                    //    今天的数字仍从最近一条历史记录出发继续叠加
+                    const recKey = escTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const prevRecRe = new RegExp(
+                        '今日\\s*' + recKey + '\\s*完成\\s*(\\d+)\\s*个任务'
+                        + '[^<]*#(?:done|cancelled):(\\d{4}-\\d{2}-\\d{2})', 'gi');
+                    let base = 0, baseDate = '', pm;
+                    while ((pm = prevRecRe.exec(ac)) !== null) {
+                        if (pm[2] < today && pm[2] >= baseDate) {
+                            baseDate = pm[2];
+                            base = parseInt(pm[1], 10);
+                        }
+                    }
+
+                    // ── 3) 今天的数字 = 基数 + 当天新增 ──
+                    //    当天多次完成：todayCount 随记录原地更新（幂等）；
+                    //    删掉今天的记录再完成，会按同一公式重算回来
+                    const count = base + todayCount;
+
+                    const recordText = '今日 ' + escTitle + ' 完成 ' + count + ' 个任务';
 
                     // 记录条目 = 已勾选任务形式，混入归档任务一起，
                     // 文本后带 #done:完成时间戳（与归档任务同一标识）
@@ -295,15 +348,17 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts) {
                         + '<span class="todo-list__label__description">' + recValue + '</span>'
                         + '</span></li>';
 
-                    // 已有该项目的记录 → 原地替换文本与时间戳；
-                    // 否则插到最后一个列表的最前面（倒序，最新在最上）
-                    const recKey = escTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    // 已有该项目「今天」的记录 → 原地替换文本与时间戳；
+                    // 否则（含跨天）插到最后一个列表的最前面（倒序，最新在最上，
+                    // 每天一条独立记录）。匹配锚定今天的日期，不会误改历史记录
                     const recRe = new RegExp(
                         '(<span class="todo-list__label__description"[^>]*>)\\s*今日\\s*'
-                        + recKey + '\\s*完成[^<]*(<\\/span>)', 'i');
+                        + recKey + '\\s*完成[^<]*#(?:done|cancelled):' + today
+                        + '[^<]*(<\\/span>)', 'i');
                     if (recRe.test(ac)) {
+                        // 函数替换器的返回值不做 $ 模板处理，直接拼接即可
                         ac = ac.replace(recRe, function (m0, m1, m2) {
-                            return m1 + recValue.replace(/\$/g, '$$$$') + m2;
+                            return m1 + recValue + m2;
                         });
                     } else {
                         const recCloseAt = ac.toLowerCase().lastIndexOf('</ul>');
@@ -333,15 +388,16 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts) {
             }
         }
 
-    }, [noteId, cbIndex, state, label, opts]);
+    }, [noteId, cbIndex, state, label, opts, text]);
 }
 
 // 设置任务日期：定位第 cbIndex 个任务，把任务文本中的 #yyyy-mm-dd 替换为 date
 // date 为 null 时清除日期（本来就没有日期则不写盘，不产生空变更）
 // 面板日期胶囊编辑与收集箱「择日再看」共用
+// text: 面板端任务文本，写盘前校验用（空则跳过校验）
 // runOnBackend: 由入口从 "trilium:api" 注入
-export function setTaskDate(runOnBackend, noteId, cbIndex, date) {
-    return runOnBackend((noteId, cbIndex, date) => {
+export function setTaskDate(runOnBackend, noteId, cbIndex, date, text) {
+    return runOnBackend((noteId, cbIndex, date, text) => {
 
         const note = api.getNote(noteId);
         if (!note) throw new Error('笔记不存在：' + noteId);
@@ -385,6 +441,23 @@ export function setTaskDate(runOnBackend, noteId, cbIndex, date) {
         const dm = liHtml.match(descRe);
         if (!dm) throw new Error('未找到任务文本');
 
+        // 文本校验（同 archiveTask）：面板数据过期时拒绝写盘，防止改错条目
+        const normLiText = s => String(s)
+            .replace(/<[^>]*>/g, '')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/&amp;/gi, '&')
+            .replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>')
+            .replace(/&quot;/gi, '"')
+            .replace(/#(?:done|cancelled):\d{4}-\d{2}-\d{2} \d{2}-\d{2}/g, '')
+            .replace(/#\d{4}-\d{2}-\d{2}/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const expectedText = normLiText(text);
+        if (expectedText && normLiText(dm[2]) !== expectedText) {
+            throw new Error('任务内容已变化，面板数据可能过期，请刷新面板后重试');
+        }
+
         const hadDate = /#\d{4}-\d{2}-\d{2}/.test(dm[2]);
         if (!date && !hadDate) return; // 清除但本来无日期：无需写盘
 
@@ -397,7 +470,7 @@ export function setTaskDate(runOnBackend, noteId, cbIndex, date) {
         content = content.slice(0, liStart) + newLi + content.slice(liEnd);
         note.setContent(content);
 
-    }, [noteId, cbIndex, date]);
+    }, [noteId, cbIndex, date, text]);
 }
 
 // 收集箱：读取 Inbox 下属 Tasks 笔记的原始内容
@@ -619,12 +692,13 @@ export function createProjectFromTemplate(runOnBackend, projectsRoot, templateId
 //   stamp: true → done/cancelled 时任务文本追加归档时间戳
 //          #done:/#cancelled:yyyy-mm-dd HH-mm（与日历 #yyyy-mm-dd 区分）
 //   未带以上标志时插到最后一个列表的未完成区末尾（Quick Tasks 只收待处理任务）
+//   text: 面板端条目文本，写盘前校验用（空则跳过校验）
 // 锚点用 lastIndexOf('</ul>')：嵌套列表中外层闭合一定在最后，
 // 所以它必然是整个笔记最后一个列表的收尾，比配对深度扫描更稳
 // 所有定位/解析都在写盘前完成（失败即 throw），不会出现半删状态
 // runOnBackend: 由入口从 "trilium:api" 注入
-export function moveInboxItem(runOnBackend, inboxNoteId, cbIndex, targetNoteId, opts) {
-    return runOnBackend((inboxNoteId, cbIndex, targetNoteId, opts) => {
+export function moveInboxItem(runOnBackend, inboxNoteId, cbIndex, targetNoteId, opts, srcText) {
+    return runOnBackend((inboxNoteId, cbIndex, targetNoteId, opts, srcText) => {
 
         opts = opts || {};
         const text = String(opts.text || '').trim();
@@ -865,6 +939,28 @@ export function moveInboxItem(runOnBackend, inboxNoteId, cbIndex, targetNoteId, 
         }
         if (liEnd < 0) throw new Error('未找到 li 结束标签');
 
+        // 文本校验（同 archiveTask）：面板数据过期时拒绝写盘，防止移动错条目
+        const normLiText = s => String(s)
+            .replace(/<[^>]*>/g, '')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/&amp;/gi, '&')
+            .replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>')
+            .replace(/&quot;/gi, '"')
+            .replace(/#(?:done|cancelled):\d{4}-\d{2}-\d{2} \d{2}-\d{2}/g, '')
+            .replace(/#\d{4}-\d{2}-\d{2}/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const expectedText = normLiText(srcText);
+        if (expectedText) {
+            const liHtmlChk = content.slice(liStart, liEnd);
+            const chk = liHtmlChk.match(
+                /<span class="todo-list__label__description"[^>]*>([\s\S]*?)<\/span>/i);
+            if (chk && normLiText(chk[1]) !== expectedText) {
+                throw new Error('收集箱条目内容已变化，面板数据可能过期，请刷新面板后重试');
+            }
+        }
+
         // 删除整个 li（含子内容）及其后紧跟的换行空白
         const inboxContent = content.slice(0, liStart)
             + content.slice(liEnd).replace(/^\s*\n/, '');
@@ -875,5 +971,5 @@ export function moveInboxItem(runOnBackend, inboxNoteId, cbIndex, targetNoteId, 
         target.setContent(targetContent);
         inboxNote.setContent(inboxContent);
 
-    }, [inboxNoteId, cbIndex, targetNoteId, opts]);
+    }, [inboxNoteId, cbIndex, targetNoteId, opts, srcText]);
 }

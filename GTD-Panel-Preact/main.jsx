@@ -390,7 +390,7 @@ export default function GtdMain() {
                 archiveNoteId: info ? info.archiveId : null,
                 quickNoteId: info ? info.noteId : null,
                 projectsRoot: NOTES.projectsRoot
-            });
+            }, task.text);
 
             // UI：等淡出动画结束后静默刷新（任务可能同时出现在多个分组）
             setTimeout(() => {
@@ -422,7 +422,7 @@ export default function GtdMain() {
                 archiveNoteId: info ? info.archiveId : null,
                 quickNoteId: info ? info.noteId : null,
                 projectsRoot: NOTES.projectsRoot
-            });
+            }, current.task.text);
 
             // 按当前视图刷新对应数据（收集箱设为待定/已取消后条目会消失）
             if (pageRef.current === 'inbox') await loadInbox(true);
@@ -442,7 +442,7 @@ export default function GtdMain() {
     // 写回后静默刷新（任务可能因此换分组：Calendar / Today's Focus）
     async function handleEditDate(task, date) {
         try {
-            await setTaskDate(runOnBackend, task.noteId, task.checkboxIndex, date);
+            await setTaskDate(runOnBackend, task.noteId, task.checkboxIndex, date, task.text);
             await load(true);
         } catch (err) {
             console.error(err);
@@ -621,7 +621,7 @@ export default function GtdMain() {
             // 择日再看：不移入，原地给任务文本追加 #yyyy-mm-dd（到期前收集箱不显示）
             if (choice.mode === 'snooze') {
                 await setTaskDate(runOnBackend, inboxNoteRef.current,
-                    item.checkboxIndex, choice.date);
+                    item.checkboxIndex, choice.date, item.text);
                 await loadInbox(true);
                 return;
             }
@@ -642,7 +642,7 @@ export default function GtdMain() {
                         text: choice.title,
                         desc: choice.desc,
                         atEnd: true // 移入新项目的「待分配任务」标题下列表末尾
-                    });
+                    }, item.text);
                 await loadInbox(true);
                 loadProjects(); // 项目列表刷新（新项目立即可选）
                 return;
@@ -709,7 +709,7 @@ export default function GtdMain() {
                     stateLabel: choice.mode === 'delete' ? '已取消'
                         : choice.mode === 'maybe' ? '待定'
                         : (choice.delegate ? '等待中' : null)
-                });
+                }, item.text);
             await loadInbox(true);
 
         } catch (err) {
@@ -733,7 +733,7 @@ export default function GtdMain() {
                 archiveNoteId: info ? info.archiveId : null,
                 quickNoteId: info ? info.noteId : null,
                 projectsRoot: NOTES.projectsRoot
-            });
+            }, item.text);
             await loadInbox(true);
         } catch (err) {
             console.error(err);
