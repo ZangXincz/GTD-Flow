@@ -73,7 +73,7 @@ const {
 const {
     collectTasks, archiveTask, setTaskDate, collectInboxTasks,
     listProjects, resolveWeekTarget, moveInboxItem, moveInboxToReference,
-    createProjectFromTemplate
+    createProjectFromTemplate, removeInboxItem
 } = gtdBackend;
 
 const dashboardMod = Dashboard;
@@ -641,7 +641,7 @@ export default function GtdMain() {
             }
 
             // 设为项目：用模板在项目文件夹下实例化新项目（项目名 = 任务标题），
-            // 再把本任务移入新项目的「待分配任务」末尾
+            // 条目已变成项目，随后从收集箱删除（不再移入项目内部）
             if (choice.mode === 'makeProject') {
                 if (!NOTES.projectsRoot || String(NOTES.projectsRoot).indexOf('填写') >= 0) {
                     throw new Error('需要先在 gtdCore 的 NOTES.projectsRoot 配置项目文件夹笔记 ID');
@@ -651,12 +651,9 @@ export default function GtdMain() {
                 }
                 const proj = await createProjectFromTemplate(runOnBackend,
                     NOTES.projectsRoot, NOTES.projectTemplate, choice.title);
-                await moveInboxItem(runOnBackend, inboxNoteRef.current,
-                    item.checkboxIndex, proj.noteId, {
-                        text: choice.title,
-                        desc: choice.desc,
-                        atEnd: true // 移入新项目的「待分配任务」标题下列表末尾
-                    }, item.text);
+                // 项目创建成功后删除收集箱条目，避免下次处理时重复出现
+                await removeInboxItem(runOnBackend, inboxNoteRef.current,
+                    item.checkboxIndex, item.text);
                 await loadInbox(true);
                 loadProjects(); // 项目列表刷新（新项目立即可选）
                 return;

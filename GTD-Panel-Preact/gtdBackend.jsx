@@ -1002,6 +1002,77 @@ export function moveInboxItem(runOnBackend, inboxNoteId, cbIndex, targetNoteId, 
     }, [inboxNoteId, cbIndex, targetNoteId, opts, srcText]);
 }
 
+// 从收集箱 Tasks 删除第 cbIndex 个 checkbox 所在 li（含其子内容）
+// 定位/校验与 moveInboxItem 的删除部分同一套实现；
+// 先完成全部定位与文本校验再写盘（失败即 throw），不会出现半删状态
+// text: 面板端条目文本，写盘前校验用（空则跳过校验）
+// runOnBackend: 由入口从 "trilium:api" 注入
+export function removeInboxItem(runOnBackend, inboxNoteId, cbIndex, srcText) {
+    return runOnBackend((inboxNoteId, cbIndex, srcText) => {
+
+        const inboxNote = api.getNote(inboxNoteId);
+        if (!inboxNote) throw new Error('未找到收集箱 Tasks 笔记');
+
+        const content = String(inboxNote.getContent());
+
+        const inputRe = /<input\b[^>]*>/gi;
+        const checkboxTypeRe = /\btype\s*=\s*(?:"checkbox"|'checkbox'|checkbox)/i;
+        let m, inputStart = -1, i = 0;
+        while ((m = inputRe.exec(content)) !== null) {
+            if (!checkboxTypeRe.test(m[0])) continue;
+            if (i++ === cbIndex) { inputStart = m.index; break; }
+        }
+        if (inputStart < 0) throw new Error('未找到对应的 checkbox');
+
+        const liStart = content.lastIndexOf('<li', inputStart);
+        if (liStart < 0) throw new Error('未找到包裹的 li 标签');
+        if (content.lastIndexOf('</li>', inputStart) > liStart) {
+            throw new Error('checkbox 与 li 不匹配');
+        }
+
+        // 深度扫描找与 liStart 配对的 </li>（兼容带子内容的条目）
+        const liTagRe = /<(\/?)li\b[^>]*>/gi;
+        liTagRe.lastIndex = liStart;
+        let liDepth = 0, liEnd = -1, lm;
+        while ((lm = liTagRe.exec(content)) !== null) {
+            if (lm[1] === '/') {
+                liDepth--;
+                if (liDepth === 0) { liEnd = lm.index + lm[0].length; break; }
+            } else {
+                liDepth++;
+            }
+        }
+        if (liEnd < 0) throw new Error('未找到 li 结束标签');
+
+        // 文本校验（同 moveInboxItem）：面板数据过期时拒绝写盘，防止删错条目
+        const normLiText = s => String(s)
+            .replace(/<[^>]*>/g, '')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/&amp;/gi, '&')
+            .replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>')
+            .replace(/&quot;/gi, '"')
+            .replace(/#(?:done|cancelled):\d{4}-\d{2}-\d{2} \d{2}-\d{2}/g, '')
+            .replace(/#\d{4}-\d{2}-\d{2}/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const expectedText = normLiText(srcText);
+        if (expectedText) {
+            const liHtml = content.slice(liStart, liEnd);
+            const chk = liHtml.match(
+                /<span class="todo-list__label__description"[^>]*>([\s\S]*?)<\/span>/i);
+            if (chk && normLiText(chk[1]) !== expectedText) {
+                throw new Error('收集箱条目内容已变化，面板数据可能过期，请刷新面板后重试');
+            }
+        }
+
+        // 删除整个 li（含子内容）及其后紧跟的换行空白
+        inboxNote.setContent(content.slice(0, liStart)
+            + content.slice(liEnd).replace(/^\s*\n/, ''));
+
+    }, [inboxNoteId, cbIndex, srcText]);
+}
+
 // 参考资料处理：
 //   1) 在 parentId（参考资料收集箱）下新建子笔记：标题 = 任务标题，
 //      内容 = 描述逐行成段落（空描述则空内容）
