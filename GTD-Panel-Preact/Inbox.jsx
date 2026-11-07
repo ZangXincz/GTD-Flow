@@ -457,8 +457,8 @@ function dateOffset(days) {
 //          onExit, onSkip, onSubmit(choice) }
 //   choice = { mode: 'done', title, desc }
 //          | { mode: 'move', title, desc, date, delegate, projectId }
-//          | { mode: 'delete' }
-//          | { mode: 'maybe' }
+//          | { mode: 'delete', desc }
+//          | { mode: 'maybe', desc }
 //          | { mode: 'snooze', date }
 export function InboxProcess({
     item, remaining, busy, errorText,
@@ -472,6 +472,7 @@ export function InboxProcess({
     const [exec, setExec] = useState(null);         // done | more
     const [date, setDate] = useState('');           // 安排日期（可选）
     const [who, setWho] = useState(null);           // me | other（委派 → 等待中）
+    const [asProject, setAsProject] = useState(false); // 选中「设为项目」（与 who 三选一）
     const [projectId, setProjectId] = useState(''); // '' = 不归入项目
     const [tip, setTip] = useState('');
 
@@ -483,6 +484,7 @@ export function InboxProcess({
         setCanAct(true);
         setExec(null);
         setWho(null);
+        setAsProject(false);
         setDate('');
         setProjectId('');
         setTip('');
@@ -492,6 +494,7 @@ export function InboxProcess({
         setCanAct(false);   // 独占选项：不再属于「可执行」路线
         setExec('delete');
         setWho(null);
+        setAsProject(false);
         setDate('');
         setProjectId('');
         setTip('');
@@ -501,6 +504,7 @@ export function InboxProcess({
         setCanAct(false);
         setExec('maybe');
         setWho(null);
+        setAsProject(false);
         setDate('');
         setProjectId('');
         setTip('');
@@ -510,6 +514,7 @@ export function InboxProcess({
         setCanAct(false);
         setExec('snooze');
         setWho(null);
+        setAsProject(false);
         setDate('');
         setProjectId('');
         setTip('');
@@ -519,12 +524,12 @@ export function InboxProcess({
         setTip('该处理方式暂未接入，先试试「是的，可执行」');
     }
 
-    // ── 设为项目：用任务文本作项目名，模板实例化到项目文件夹下，任务移入 ──
+    // ── 设为项目：仅暂选（与「我来做/委派他人」三选一），
+    //    点「下一步」时才用任务文本作项目名，模板实例化并移入 ──
     function pickMakeProject() {
-        const cleanTitle = String(title).trim();
-        if (!cleanTitle) { setTip('项目名称不能为空'); return; }
+        setAsProject(true);
+        setWho(null);
         setTip('');
-        onSubmit({ mode: 'makeProject', title: cleanTitle, desc: String(desc).trim() });
     }
 
     // ── 底部主按钮：应用当前选择并处理本条 ──
@@ -535,13 +540,13 @@ export function InboxProcess({
 
         if (!canAct && !unary) { setTip('请先选择处理方式'); return; }
         if (exec === 'delete') {
-            // 删除：保留原文，状态标记为已取消，移入 Quick Tasks
-            onSubmit({ mode: 'delete' });
+            // 删除：保留原文，状态标记为已取消，移入 Archive；备注转子内容
+            onSubmit({ mode: 'delete', desc: String(desc).trim() });
             return;
         }
         if (exec === 'maybe') {
-            // 将来/也许：保留原文，状态标记为待定，移入指定文件
-            onSubmit({ mode: 'maybe' });
+            // 将来/也许：保留原文，状态标记为待定，移入指定文件；备注转子内容
+            onSubmit({ mode: 'maybe', desc: String(desc).trim() });
             return;
         }
         if (exec === 'snooze') {
@@ -558,6 +563,13 @@ export function InboxProcess({
             return;
         }
         if (exec !== 'more') { setTip('请先选择「已完成」或「需要更长时间」'); return; }
+
+        // 设为项目：与「我来做/委派他人」三选一，选中即不需要 who；
+        // 标题为空在上面已拦截（项目名 = 标题）
+        if (asProject) {
+            onSubmit({ mode: 'makeProject', title: cleanTitle, desc: String(desc).trim() });
+            return;
+        }
         if (!who) { setTip('请选择「我来做」还是「委派他人」'); return; }
 
         onSubmit({
@@ -576,7 +588,7 @@ export function InboxProcess({
         (unary && (exec !== 'snooze' || !!date)) ||
         (canAct && !!String(title).trim() && (
             exec === 'done' ||
-            (exec === 'more' && !!who)
+            (exec === 'more' && (!!who || asProject))
         ))
     );
 
@@ -724,15 +736,15 @@ export function InboxProcess({
                             <button
                                 class={'gtd-proc-wide-btn' + (who === 'me' ? ' gtd-wide-active' : '')}
                                 disabled={busy}
-                                onClick={() => { setWho('me'); setTip(''); }}
+                                onClick={() => { setWho('me'); setAsProject(false); setTip(''); }}
                             >→ 我来做</button>
                             <button
                                 class={'gtd-proc-wide-btn' + (who === 'other' ? ' gtd-wide-active' : '')}
                                 disabled={busy}
-                                onClick={() => { setWho('other'); setTip(''); }}
+                                onClick={() => { setWho('other'); setAsProject(false); setTip(''); }}
                             >👤 委派他人</button>
                             <button
-                                class="gtd-proc-wide-btn"
+                                class={'gtd-proc-wide-btn' + (asProject ? ' gtd-wide-active' : '')}
                                 disabled={busy}
                                 onClick={pickMakeProject}
                             >📁 设为项目</button>

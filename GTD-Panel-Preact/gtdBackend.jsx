@@ -196,6 +196,23 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, t
             }
         }
 
+        // 最后一个「顶层列表」的闭合位置。不能用 lastIndexOf('</ul>')：
+        // 上次插入的条目可能带嵌套子内容（备注子列表），那时整个内容里
+        // 最后一个 </ul> 是嵌套子列表的闭合，锚点会插进上一条的子列表里
+        const lastTopUlClose = s => {
+            const re = /<(\/?)ul\b[^>]*>/gi;
+            let depth = 0, last = -1, m;
+            while ((m = re.exec(s)) !== null) {
+                if (m[1] === '/') {
+                    depth--;
+                    if (depth === 0) last = m.index;
+                } else {
+                    depth++;
+                }
+            }
+            return last;
+        };
+
         // 文本：移除旧时间戳，done/cancelled 追加新的
         const descRe = /(<span class="todo-list__label__description"[^>]*>)([\s\S]*?)(<\/span>)/i;
         const dm = liHtml.match(descRe);
@@ -246,7 +263,7 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, t
 
             const archiveContent = String(archiveNote.getContent());
             // 插到最后一个顶层列表的最前面；没有列表则在末尾新建
-            const closeAt = archiveContent.toLowerCase().lastIndexOf('</ul>');
+            const closeAt = lastTopUlClose(archiveContent);
             let newArchive;
             if (closeAt < 0) {
                 newArchive = archiveContent.replace(/<p>(&nbsp;|\s)*<\/p>/gi, '').trim()
@@ -361,7 +378,7 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, t
                             return m1 + recValue + m2;
                         });
                     } else {
-                        const recCloseAt = ac.toLowerCase().lastIndexOf('</ul>');
+                        const recCloseAt = lastTopUlClose(ac);
                         if (recCloseAt < 0) {
                             ac = ac.replace(/<p>(&nbsp;|\s)*<\/p>/gi, '').trim()
                                 + '<ul class="todo-list">' + recLi + '</ul>';
@@ -680,21 +697,21 @@ export function createProjectFromTemplate(runOnBackend, projectsRoot, templateId
 // 把收集箱条目移动到目标笔记：
 //   1) 从 Tasks 笔记删除第 cbIndex 个 checkbox 所在 li（含其子内容）
 //   2) 用传入的文本组装新 li，插入目标笔记任务列表
-// opts: { text, desc?, state?, stateLabel?, atEnd?, appendEnd?, prepend?, stamp? }
+// opts: { text, desc?, state?, stateLabel?, atEnd?, prepend?, stamp? }
 //   desc 按行拆成任务子内容（一行一个 <li>）
 //   state: null → 未完成 | 'waiting' → 等待中
 //          'done' → 已完成（勾选）| 'cancelled' → 已取消
 //   atEnd: true → 放到「待分配任务」标题下列表的最末尾（移入项目用），
 //          没有该标题则在笔记末尾创建标题 + 新列表
-//   appendEnd: true → 直接放到最后一个列表的最末尾，不做标题逻辑
-//          （移入指定文件用，如「将来/也许」）
-//   prepend: true → 放到最后一个列表的最前面（倒序，最新在最上；移入 Archive 用）
+//   prepend: true → 放到最后一个列表的最前面（倒序，最新在最上；
+//          移入 Archive / 将来也许用）
 //   stamp: true → done/cancelled 时任务文本追加归档时间戳
 //          #done:/#cancelled:yyyy-mm-dd HH-mm（与日历 #yyyy-mm-dd 区分）
 //   未带以上标志时插到最后一个列表的未完成区末尾（Quick Tasks 只收待处理任务）
 //   text: 面板端条目文本，写盘前校验用（空则跳过校验）
-// 锚点用 lastIndexOf('</ul>')：嵌套列表中外层闭合一定在最后，
-// 所以它必然是整个笔记最后一个列表的收尾，比配对深度扫描更稳
+// 锚点用「顶层 ul 闭合」深度扫描。不能用 lastIndexOf('</ul>')：
+// 上次插入的条目带嵌套子内容（备注子列表）时，最后一个 </ul> 是
+// 子列表的闭合，新条目会被错误插进上一条的子列表里（表现为倒序/嵌套错乱）
 // 所有定位/解析都在写盘前完成（失败即 throw），不会出现半删状态
 // runOnBackend: 由入口从 "trilium:api" 注入
 export function moveInboxItem(runOnBackend, inboxNoteId, cbIndex, targetNoteId, opts, srcText) {
@@ -752,9 +769,24 @@ export function moveInboxItem(runOnBackend, inboxNoteId, cbIndex, targetNoteId, 
 
         let targetContent = String(target.getContent());
 
-        // 锚点：整个笔记最后一个 </ul>（嵌套时外层闭合在最后，必然是
-        // 最后一个列表的收尾）；没有列表时新建
-        const closeAt = targetContent.toLowerCase().lastIndexOf('</ul>');
+        // 最后一个「顶层列表」的闭合位置（深度扫描，见函数头注释；
+        // 这就是将来/也许出现「倒序插入」的根因）
+        const lastTopUlClose = s => {
+            const re = /<(\/?)ul\b[^>]*>/gi;
+            let depth = 0, last = -1, m;
+            while ((m = re.exec(s)) !== null) {
+                if (m[1] === '/') {
+                    depth--;
+                    if (depth === 0) last = m.index;
+                } else {
+                    depth++;
+                }
+            }
+            return last;
+        };
+
+        // 锚点：最后一个顶层列表的收尾；没有列表时新建
+        const closeAt = lastTopUlClose(targetContent);
 
         if (closeAt < 0) {
             // 没有任何列表：清掉空段落，新建任务列表
@@ -779,10 +811,6 @@ export function moveInboxItem(runOnBackend, inboxNoteId, cbIndex, targetNoteId, 
                 targetContent = targetContent.slice(0, openTagEnd) + li
                     + targetContent.slice(openTagEnd);
             }
-
-        } else if (opts.appendEnd) {
-            // 移入指定文件：直接插到最后一个列表的最末尾
-            targetContent = targetContent.slice(0, closeAt) + li + targetContent.slice(closeAt);
 
         } else if (opts.atEnd) {
             // 移入项目：放到「待分配任务」标题下列表的最末尾；

@@ -696,11 +696,10 @@ export default function GtdMain() {
                 item.checkboxIndex, targetId, {
                     text,
                     desc: choice.desc,
-                    // 移入项目 → 待分配任务末尾；将来也许 → 最后列表末尾；
-                    // 完成/取消 → Archive 倒序 + 时间戳；Quick Tasks → 未完成区末尾
+                    // 移入项目 → 待分配任务末尾；将来也许/完成/取消 →
+                    // 最后列表最前（倒序，最新在最上）；Quick Tasks → 未完成区末尾
                     atEnd: choice.mode === 'move' && !!choice.projectId,
-                    appendEnd: choice.mode === 'maybe',
-                    prepend: isClosed,
+                    prepend: isClosed || choice.mode === 'maybe',
                     stamp: isClosed,
                     state: choice.mode === 'done' ? 'done'
                         : choice.mode === 'delete' ? 'cancelled'
