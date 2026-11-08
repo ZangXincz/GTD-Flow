@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">快速收集</string>
+    <string name="shortcut_label">快速录入</string>
+    <string name="shortcut_long_label">快速录入到 Trilium</string>
+</resources>

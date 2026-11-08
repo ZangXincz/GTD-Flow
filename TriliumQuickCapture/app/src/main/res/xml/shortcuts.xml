@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 长按 App 图标弹出的「快速录入」入口 -->
+    <shortcut
+        android:shortcutId="quick_capture"
+        android:enabled="true"
+        android:icon="@drawable/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_label"
+        android:shortcutLongLabel="@string/shortcut_long_label">
+        <intent
+            android:action="com.gtd.quickcapture.QUICK"
+            android:targetPackage="com.gtd.quickcapture"
+            android:targetClass="com.gtd.quickcapture.MainActivity" />
+    </shortcut>
+</shortcuts>

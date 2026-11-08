@@ -1,3 +1,29 @@
+# ── 原有排除 ──
 /eg.js
 /gtd-task-panel.js
 /Render-Template
+
+# ── Android / TriliumQuickCapture ──
+# 构建产物（APK、中间文件，体积大且可再生）
+**/build/
+**/.cxx/
+**/captures/
+
+# Gradle 本地缓存与机器特定配置（SDK 路径，每台电脑不同）
+.gradle/
+local.properties
+
+# Android Studio / IntelliJ 工程配置（个人差异大，可自动生成）
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# 签名文件（绝不能进仓库）
+*.jks
+*.keystore
+
+# ── 通用系统垃圾 ──
+.DS_Store
+Thumbs.db
+desktop.ini

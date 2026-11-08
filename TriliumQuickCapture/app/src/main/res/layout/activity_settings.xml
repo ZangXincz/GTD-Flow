@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/dialog_bg">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="设置"
+            android:textColor="#ececec"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="服务器地址"
+            android:textColor="#888888"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/etServer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="http://192.168.1.10:8080"
+            android:textColor="#ececec"
+            android:textColorHint="#666666"
+            android:textSize="14sp"
+            android:background="@drawable/edit_bg"
+            android:padding="10dp"
+            android:inputType="textUri"
+            android:layout_marginTop="4dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="ETAPI Token（Trilium 设置 → ETAPI 创建）"
+            android:textColor="#888888"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/etToken"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="EtAPI Token"
+            android:textColor="#ececec"
+            android:textColorHint="#666666"
+            android:textSize="14sp"
+            android:background="@drawable/edit_bg"
+            android:padding="10dp"
+            android:inputType="text"
+            android:layout_marginTop="4dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="目标笔记 noteId（浏览器打开收藏笔记，地址栏 # 后面那串）"
+            android:textColor="#888888"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/etNoteId"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="如 kfU2z6nbGrEe"
+            android:textColor="#ececec"
+            android:textColorHint="#666666"
+            android:textSize="14sp"
+            android:background="@drawable/edit_bg"
+            android:padding="10dp"
+            android:inputType="text"
+            android:layout_marginTop="4dp" />
+
+        <Button
+            android:id="@+id/btnSave"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:backgroundTint="#2563eb"
+            android:text="保存"
+            android:textColor="#ffffff"
+            android:textAllCaps="false" />
+    </LinearLayout>
+</ScrollView>

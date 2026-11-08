@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 对话框式浮窗主题：透明窗口，内容用自绘圆角卡片 -->
+    <style name="AppTheme" parent="android:Theme.Material.Dialog.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:colorAccent">#2563eb</item>
+    </style>
+</resources>
