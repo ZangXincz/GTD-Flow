@@ -54,9 +54,10 @@ const hostNote = (typeof originEntity !== 'undefined' && originEntity) ? originE
 // ── 子笔记模块存在性检查（缺失/标题不符时报出可读的错误，
 //    否则解构 undefined 会让加载失败信息难以定位）──
 if (typeof gtdCore === 'undefined' || typeof gtdBackend === 'undefined'
+    || typeof gtdRepeat === 'undefined'
     || typeof Dashboard === 'undefined' || typeof Inbox === 'undefined') {
     throw new Error('GTD 面板加载失败：缺少子笔记模块。'
-        + '请检查 gtdCore / gtdBackend / Dashboard / Inbox 四个子笔记是否存在，'
+        + '请检查 gtdCore / gtdBackend / gtdRepeat / Dashboard / Inbox 五个子笔记是否存在，'
         + '标题是否与全局模块名一字不差。');
 }
 
@@ -78,6 +79,8 @@ const {
 
 const dashboardMod = Dashboard;
 const { Dashboard: DashboardView, PANEL_CSS, StateMenu } = dashboardMod;
+
+const { nextRepeatDate, repeatLabel } = gtdRepeat;
 
 const inboxMod = Inbox;
 const { Inbox: InboxView, INBOX_CSS, InboxProcess } = inboxMod;
@@ -385,13 +388,17 @@ export default function GtdMain() {
         try {
 
             // Backend：标记完成（勾选 + #done: 时间戳；Quick Tasks 里的移入
-            // Archive 倒序，项目任务刷新 Archive 的「处理了 项目 ×N」记录）
+            // Archive 倒序，项目任务刷新 Archive 的「处理了 项目 ×N」记录；
+            // 重复任务由后端按 repeatDate 生成下一次实例）
             const info = weekInfoRef.current;
+            const repeatDate = (task.repeat && task.date)
+                ? nextRepeatDate(task.repeat, task.date, todayStr())
+                : null;
             await archiveTask(runOnBackend, task.noteId, task.checkboxIndex, 'done', null, {
                 archiveNoteId: info ? info.archiveId : null,
                 quickNoteId: info ? info.noteId : null,
                 projectsRoot: NOTES.projectsRoot
-            }, task.text);
+            }, task.text, repeatDate);
 
             // UI：等淡出动画结束后静默刷新（任务可能同时出现在多个分组）
             setTimeout(() => {
@@ -925,6 +932,7 @@ export default function GtdMain() {
                             sections={sections}
                             todayStr={todayStr()}
                             completingKeys={completingKeys}
+                            repeatLabel={repeatLabel}
                             onMenuOpen={(task, x, y) => setMenu({ task, x, y })}
                             onComplete={handleComplete}
                             onOpenTask={handleOpenTask}

@@ -85,6 +85,10 @@ export const ORDER_STEP = 100; // 排位步长，留出插入空间
 export const DATE_RE = /#(\d{4}-\d{2}-\d{2})/;
 export const DATE_GLOBAL_RE = /#\d{4}-\d{2}-\d{2}/g;
 
+// 重复任务标记（与 gtdRepeat.REPEAT_RE 同一定义，gtdCore 不引外部模块，改动需两处同步）
+// 仅当任务同时带 #日期 时才生效（parseNotes 里判定）
+export const REPEAT_RE = /#every:([a-z0-9]+)/i;
+
 // 归一化文本（压缩空白），任务提取与编辑器定位共用
 export function normText(s) {
     return String(s).replace(/\s+/g, ' ').trim();
@@ -168,14 +172,23 @@ export function parseNotes(rawNotes, today) {
             const dateMatch = text.match(DATE_RE);
             const date = dateMatch ? dateMatch[1] : null;
 
+            // 重复标记：必须同时带 #日期 才生效，否则视为普通文本
+            const repMatch = text.match(REPEAT_RE);
+            const repeat = (repMatch && date) ? repMatch[1].toLowerCase() : null;
+
             // 暂停的项目：软排斥，只保留 进行中 / 等待中 / 带日期 的任务，
             // 纯待办（todo 且无日期）不显示
             if (row.paused && state === 'todo' && !date) continue;
 
-            // 文本中的 #日期 由日期标签统一展示，这里从文本中全部移除，避免重复
-            const displayText = date
+            // 文本中的 #日期 与生效的 #every: 标记由徽章/日期胶囊统一展示，
+            // 这里从文本中移除，避免重复
+            let displayText = date
                 ? (normText(text.replace(DATE_GLOBAL_RE, '')) || date)
                 : text;
+            if (repeat) {
+                displayText = normText(displayText.replace(REPEAT_RE, ''))
+                    || displayText;
+            }
 
             // 排序键：noteId + 文本，重名时追加序号
             const keyBase = row.noteId + '::' + displayText;
@@ -201,6 +214,7 @@ export function parseNotes(rawNotes, today) {
                 checkboxIndex: idx,
                 state,
                 date,
+                repeat,
                 overdue: !!date && date < today,
                 key,
                 flowMode: row.flowMode,

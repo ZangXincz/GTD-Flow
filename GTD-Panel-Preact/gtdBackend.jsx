@@ -123,8 +123,8 @@ export function collectTasks(runOnBackend, scope, exclude, paused) {
 // text: 面板端任务文本，写盘前与 li 实际文本比对（防止面板数据过期按序号改错
 //       条目）；为空则跳过校验
 // runOnBackend: 由入口从 "trilium:api" 注入
-export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, text) {
-    return runOnBackend((noteId, cbIndex, state, label, opts, text) => {
+export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, text, repeatDate) {
+    return runOnBackend((noteId, cbIndex, state, label, opts, text, repeatDate) => {
 
         const isDone = state === 'done';
         const isClosed = isDone || state === 'cancelled';
@@ -185,6 +185,7 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, t
             .replace(/&gt;/gi, '>')
             .replace(/&quot;/gi, '"')
             .replace(/#(?:done|cancelled):\d{4}-\d{2}-\d{2} \d{2}-\d{2}/g, '')
+            .replace(/#every:[a-z0-9]+/gi, '')
             .replace(/#\d{4}-\d{2}-\d{2}/g, '')
             .replace(/\s+/g, ' ')
             .trim();
@@ -221,6 +222,8 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, t
         let inner = dm[2]
             .replace(/#(?:done|cancelled):\d{4}-\d{2}-\d{2} \d{2}-\d{2}/g, '')
             .replace(/\s+$/, '');
+        // 原始文本（未盖完成时间戳）：重复任务的翻新/履历用
+        const repeatInner = inner;
         if (isClosed) inner = inner + ' #' + closeTag + ':' + stamp;
         liHtml = liHtml.slice(0, dm.index) + dm[1] + inner + dm[3]
             + liHtml.slice(dm.index + dm[0].length);
@@ -252,6 +255,137 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, t
         }
 
         const closedContent = content.slice(0, liStart) + liHtml + content.slice(liEnd);
+
+        // ── 2.5) 重复任务：#every: 标记 + 完成时（仅 done；取消=终止循环）生成下一次 ──
+        // repeatDate 由前端 gtdRepeat.nextRepeatDate 按锚点 #日期 算好传入，后端不算日期
+        // 快速任务：原 li 翻新（未勾选、换新日期），完成副本照常进 Archive
+        // 项目等笔记：父 li 整体翻新，已完成记录收进子内容（见下）
+        const repM = isDone ? repeatInner.match(/#every:([a-z0-9]+)/i) : null;
+        let quickRepeatLi = null;     // Quick Tasks：原位置翻新后的 li
+        let projectRepeatLi = null;   // 项目：翻新后的父 li（含履历子内容）
+        if (isDone && repM && repeatDate && repeatInner.match(/#\d{4}-\d{2}-\d{2}/)) {
+
+            // 翻新文本：旧 #日期 → 下一次日期；#every: 标记保留
+            const renewedInner = repeatInner
+                .replace(/#\d{4}-\d{2}-\d{2}/g, ' #' + repeatDate)
+                .replace(/\s+/g, ' ')
+                .trim();
+
+            // 未勾选的 label span（全新待办）
+            const freshLabel = '<span class="todo-list__label">'
+                + '<span contenteditable="false">'
+                + '<input type="checkbox" tabindex="-1"></span>'
+                + '<span class="todo-list__label__description">' + renewedInner + '</span>'
+                + '</span>';
+
+            if (opts && noteId === opts.quickNoteId) {
+                // Quick Tasks：从已盖戳的 liHtml 逆操作出翻新 li（保留原子内容）
+                let rl = liHtml.replace(descRe, (m0, m1, m2, m3) => m1 + renewedInner + m3);
+                const rim = rl.match(/<input\b[^>]*>/i);
+                if (rim) {
+                    rl = rl.slice(0, rim.index)
+                        + rim[0].replace(/\s*checked(="[^"]*")?/i, '')
+                        + rl.slice(rim.index + rim[0].length);
+                }
+                const rOpenEnd = rl.indexOf('>');
+                let rOpen = rl.slice(0, rOpenEnd + 1);
+                rOpen = rOpen.replace(/\s*data-trilium-task-state="[^"]*"/i, '');
+                rOpen = rOpen.replace(/\s*title="(?:进行中|等待中|已取消|已完成|待定|待办)"/i, '');
+                quickRepeatLi = rOpen + rl.slice(rOpenEnd + 1);
+
+            } else {
+                // 项目等笔记：已完成的不动（#done: 标签保留，计数不受影响），
+                // 父 li 翻新为下一次，履历收进子内容（均为任务文本形式）：
+                //   [x] 任务名 #旧日期 #done:时间戳   ← 最近一次（唯一保留的细节）
+                //   [x] 已折叠存档 N 条               ← 中间场次汇总（不保留细节）
+                //   [x] 任务名 #第一次日期 #done:时间戳 ← 第一次完成记录，永久保留
+                // 注意：重复任务的子内容被本系统接管，请勿手动存放其他内容
+                const oldDateM = repeatInner.match(/#(\d{4}-\d{2}-\d{2})/);
+                const cleanName = repeatInner
+                    .replace(/#\d{4}-\d{2}-\d{2}/g, '')
+                    .replace(/#every:[a-z0-9]+/gi, '')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+
+                // 从原始 li（未盖戳版本）解析现有履历：切出子内容里的顶层子 li
+                const origLi = content.slice(liStart, liEnd);
+                const descEnd = dm.index + dm[0].length;
+                const ulAt = origLi.toLowerCase().indexOf('<ul', descEnd);
+                let folded = 0;
+                let prevDetailText = null;  // 旧的「最近一次」记录（含时间戳）
+                let firstRecordText = null; // 已保存的「第一次」记录（含时间戳）
+
+                if (ulAt >= 0) {
+                    const ulRe = /<(\/?)ul\b[^>]*>/gi;
+                    ulRe.lastIndex = ulAt;
+                    let ud = 0, ulOpenEnd = -1, ulCloseAt = -1, um2;
+                    while ((um2 = ulRe.exec(origLi)) !== null) {
+                        if (um2[1] === '/') {
+                            ud--;
+                            if (ud === 0) { ulCloseAt = um2.index; break; }
+                        } else {
+                            if (ud === 0) ulOpenEnd = um2.index + um2[0].length;
+                            ud++;
+                        }
+                    }
+                    if (ulCloseAt >= 0) {
+                        const region = origLi.slice(ulOpenEnd, ulCloseAt);
+                        // 轻量归一化：只剥标签，保留 #done: 等标记（履历分类依据）
+                        const cNorm = s => String(s)
+                            .replace(/<[^>]*>/g, '')
+                            .replace(/&nbsp;/gi, ' ')
+                            .replace(/\s+/g, ' ')
+                            .trim();
+                        const cLiRe = /<(\/?)li\b[^>]*>/gi;
+                        let cd = 0, cStart = -1, cm2;
+                        while ((cm2 = cLiRe.exec(region)) !== null) {
+                            if (cm2[1] === '/') {
+                                cd--;
+                                if (cd === 0 && cStart >= 0) {
+                                    const cHtml = region.slice(cStart, cm2.index + cm2[0].length);
+                                    const cText = cNorm(cHtml);
+                                    if (cText.indexOf('#done:') >= 0
+                                        || cText.indexOf('#cancelled:') >= 0) {
+                                        // 子内容固定顺序 [最近一次, 汇总, 第一次]，
+                                        // 第 1 条带戳的是旧「最近一次」，第 2 条是「第一次」
+                                        if (prevDetailText === null) {
+                                            prevDetailText = cText;
+                                        } else if (firstRecordText === null) {
+                                            firstRecordText = cText;
+                                        }
+                                    } else {
+                                        const fm = cText.match(/已折叠存档\s*(\d+)/);
+                                        if (fm) folded = parseInt(fm[1], 10);
+                                    }
+                                    cStart = -1;
+                                }
+                            } else {
+                                if (cd === 0) cStart = cm2.index;
+                                cd++;
+                            }
+                        }
+                    }
+                }
+                // 旧的「最近一次」何去何从：
+                //   「第一次」记录已存在 → 它是中间场次，折叠进汇总（+1）
+                //   尚无「第一次」记录   → 它就是第一次完成，转为永久保留的第一条
+                if (prevDetailText && firstRecordText) folded++;
+                const keepFirstRecord = firstRecordText || prevDetailText;
+
+                const checkedLi = t => '<li><span class="todo-list__label">'
+                    + '<span contenteditable="false">'
+                    + '<input type="checkbox" tabindex="-1" checked="checked"></span>'
+                    + '<span class="todo-list__label__description">' + t + '</span>'
+                    + '</span></li>';
+
+                let kids = checkedLi(cleanName + ' #' + oldDateM[1]
+                    + ' #' + closeTag + ':' + stamp);
+                if (folded > 0) kids += checkedLi('已折叠存档 ' + folded + ' 条');
+                if (keepFirstRecord) kids += checkedLi(keepFirstRecord);
+
+                projectRepeatLi = '<li>' + freshLabel + '<ul>' + kids + '</ul></li>';
+            }
+        }
 
         // ── 3) Quick Tasks 里的任务完成/取消 → 移入 Archive（列表最前 = 最新在最上）──
         let moved = false;
@@ -286,14 +420,30 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, t
             }
             archiveNote.setContent(newArchive);
 
-            // 从源笔记删除该 li（源已写盘更新，这里基于新内容删除），
-            // 并清掉紧跟的换行空白，避免残留空行（与 moveInboxItem 行为一致）
-            note.setContent(closedContent.slice(0, liStart)
-                + closedContent.slice(liEnd).replace(/^\s*\n/, ''));
+            if (quickRepeatLi) {
+                // 重复任务：源位置原地翻新（不删除条目）
+                note.setContent(content.slice(0, liStart)
+                    + quickRepeatLi + content.slice(liEnd));
+            } else {
+                // 从源笔记删除该 li（源已写盘更新，这里基于新内容删除），
+                // 并清掉紧跟的换行空白，避免残留空行（与 moveInboxItem 行为一致）
+                note.setContent(closedContent.slice(0, liStart)
+                    + closedContent.slice(liEnd).replace(/^\s*\n/, ''));
+            }
             moved = true;
         }
 
-        if (!moved) note.setContent(closedContent);
+        if (!moved) {
+            if (projectRepeatLi) {
+                // 重复任务：父 li 整体替换（翻新为下一次 + 履历子内容）；
+                // 已完成记录不再以打勾形式留在顶层，其 #done: 标签移入
+                // 子内容里的履历条目，项目计数（数标签）不受影响
+                note.setContent(content.slice(0, liStart)
+                    + projectRepeatLi + content.slice(liEnd));
+            } else {
+                note.setContent(closedContent);
+            }
+        }
 
         // ── 4) 项目任务 → 刷新 Archive 的「处理了 项目 ×N」记录 ──
         // Quick Tasks 在北极星下、项目在 projectsRoot 下，两者互斥不会同时命中
@@ -316,8 +466,9 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, t
                     const escTitle = String(proj.title || '未命名项目')
                         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-                    // ── 1) 当天新增数：只数项目子树里带「今天」日期的时间戳 ──
-                    //    删除历史任务不影响这个数（历史时间戳日期不是今天）
+                    // ── 1) 当天完成数：只数项目子树里带「今天」日期的时间戳 ──
+                    //    每天从 0 起算（每日快照，不累加历史）；
+                    //    删除历史任务不影响当天数（历史时间戳日期不是今天）
                     const todayStampRe = new RegExp(
                         '#(?:done|cancelled):' + today + ' \\d{2}-\\d{2}', 'g');
                     let todayCount = 0;
@@ -334,32 +485,17 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, t
                     if (!archiveNote) throw new Error('未找到 Archive 笔记：' + opts.archiveNoteId);
                     let ac = String(archiveNote.getContent());
 
-                    // ── 2) 基数：该项目最近一条「今天之前」记录的数字（只读不写）──
-                    //    记录形如「今日 TITLE（#noteId）完成 N 个任务 #done:YYYY-MM-DD HH-mm」；
-                    //    历史记录是快照，永远不会被改写，删除历史任务/记录后，
-                    //    今天的数字仍从最近一条历史记录出发继续叠加
-                    //    定位统一锚定项目 noteId（改名不影响），只认带（#id）的记录
+                    // 定位锚点：项目 noteId（改名不影响），只认带（#id）的记录
                     const escId = String(projectId)
                         .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-                    const prevRecRe = new RegExp(
-                        '（#' + escId + '）[^<]*?完成\\s*(\\d+)\\s*个任务'
-                        + '[^<]*#(?:done|cancelled):(\\d{4}-\\d{2}-\\d{2})', 'gi');
-                    let base = 0, baseDate = '', pm;
-                    while ((pm = prevRecRe.exec(ac)) !== null) {
-                        if (pm[2] < today && pm[2] >= baseDate) {
-                            baseDate = pm[2];
-                            base = parseInt(pm[1], 10);
-                        }
-                    }
-
-                    // ── 3) 今天的数字 = 基数 + 当天新增 ──
+                    // ── 2) 当天数字 = 当天完成数（每日独立快照）──
                     //    当天多次完成：todayCount 随记录原地更新（幂等）；
                     //    删掉今天的记录再完成，会按同一公式重算回来
-                    const count = base + todayCount;
+                    const count = todayCount;
 
                     // 记录文本：项目名后紧跟（#noteId）作为定位锚点——
-                    // 项目改名后基数/今日记录仍能接上；标题用当前名重写
+                    // 项目改名后今日记录仍能接上；标题用当前名重写
                     const recordText = '今日 ' + escTitle + '（#' + projectId
                         + '）完成 ' + count + ' 个任务';
 
@@ -414,7 +550,7 @@ export function archiveTask(runOnBackend, noteId, cbIndex, state, label, opts, t
             }
         }
 
-    }, [noteId, cbIndex, state, label, opts, text]);
+    }, [noteId, cbIndex, state, label, opts, text, repeatDate]);
 }
 
 // 设置任务日期：定位第 cbIndex 个任务，把任务文本中的 #yyyy-mm-dd 替换为 date
@@ -476,6 +612,7 @@ export function setTaskDate(runOnBackend, noteId, cbIndex, date, text) {
             .replace(/&gt;/gi, '>')
             .replace(/&quot;/gi, '"')
             .replace(/#(?:done|cancelled):\d{4}-\d{2}-\d{2} \d{2}-\d{2}/g, '')
+            .replace(/#every:[a-z0-9]+/gi, '')
             .replace(/#\d{4}-\d{2}-\d{2}/g, '')
             .replace(/\s+/g, ' ')
             .trim();
@@ -996,6 +1133,7 @@ export function moveInboxItem(runOnBackend, inboxNoteId, cbIndex, targetNoteId, 
             .replace(/&gt;/gi, '>')
             .replace(/&quot;/gi, '"')
             .replace(/#(?:done|cancelled):\d{4}-\d{2}-\d{2} \d{2}-\d{2}/g, '')
+            .replace(/#every:[a-z0-9]+/gi, '')
             .replace(/#\d{4}-\d{2}-\d{2}/g, '')
             .replace(/\s+/g, ' ')
             .trim();
@@ -1073,6 +1211,7 @@ export function removeInboxItem(runOnBackend, inboxNoteId, cbIndex, srcText) {
             .replace(/&gt;/gi, '>')
             .replace(/&quot;/gi, '"')
             .replace(/#(?:done|cancelled):\d{4}-\d{2}-\d{2} \d{2}-\d{2}/g, '')
+            .replace(/#every:[a-z0-9]+/gi, '')
             .replace(/#\d{4}-\d{2}-\d{2}/g, '')
             .replace(/\s+/g, ' ')
             .trim();
@@ -1159,6 +1298,7 @@ export function moveInboxToReference(runOnBackend, inboxNoteId, cbIndex,
             .replace(/&gt;/gi, '>')
             .replace(/&quot;/gi, '"')
             .replace(/#(?:done|cancelled):\d{4}-\d{2}-\d{2} \d{2}-\d{2}/g, '')
+            .replace(/#every:[a-z0-9]+/gi, '')
             .replace(/#\d{4}-\d{2}-\d{2}/g, '')
             .replace(/\s+/g, ' ')
             .trim();

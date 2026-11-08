@@ -111,6 +111,14 @@ export const PANEL_CSS = `
         border-color: transparent;
         font-weight: 600;
     }
+    /* 重复任务徽章：只显示 🔁，完整规则放悬停提示 */
+    .gtd-task-repeat {
+        flex-shrink: 0;
+        font-size: 11px;
+        line-height: 1;
+        cursor: default;
+        user-select: none;
+    }
     /* 日期胶囊可点击编辑：复用来源笔记胶囊（gtd-task-src）的悬浮交互 */
     .gtd-task-date.gtd-date-editable {
         cursor: pointer;
@@ -364,7 +372,7 @@ export const PANEL_CSS = `
 // 状态菜单已抽出为下方 StateMenu（两个视图共用）
 // =========================================================
 export function Dashboard({
-    sections, todayStr, completingKeys,
+    sections, todayStr, completingKeys, repeatLabel,
     onMenuOpen,
     onComplete, onOpenTask, onOpenNote, onEditDate,
     onDragStart, onDragOverRow, onDragEnd
@@ -524,6 +532,14 @@ export function Dashboard({
                 >
                     {t.text}
                 </span>
+
+                {/* 重复任务徽章（t.repeat 由入口用 gtdRepeat 解析注入） */}
+                {t.repeat ? (
+                    <span
+                        class="gtd-task-repeat"
+                        title={repeatLabel ? ('重复：' + repeatLabel(t.repeat)) : t.repeat}
+                    >🔁</span>
+                ) : null}
 
                 {t.date ? (
                     <span
